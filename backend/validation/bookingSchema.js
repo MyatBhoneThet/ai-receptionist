@@ -3,6 +3,7 @@ import { z } from 'zod';
 export const BookingResponseSchema = z.object({
     message: z.string().default(""),
     speak: z.string().default(""),
+
     intent: z.enum([
         'book_restaurant',
         'book_hotel',
@@ -14,17 +15,17 @@ export const BookingResponseSchema = z.object({
     ]).default('unknown'),
 
     data: z.object({
-        service_type: z.string().optional().default(""),
-        date: z.string().optional().default(""),
-        start_time: z.string().optional().default(""),
-        end_time: z.string().optional().default(""),
+        service_type: z.string().default(""),
+        date: z.string().default(""),
+        start_time: z.string().default(""),
+        end_time: z.string().default(""),
         people: z.number().nullable().optional(),
-        location: z.string().optional().default(""),
-        notes: z.string().optional().default(""),
+        location: z.string().default(""),
+        notes: z.string().default(""),
     }).default({}),
 
-    missing_fields: z.array(z.string()).optional().default([]),
-    confidence: z.number().min(0).max(1).optional().default(0.5),
+    missing_fields: z.array(z.string()).default([]),
+    confidence: z.number().min(0).max(1).default(0.5),
 });
 
 export function validateBookingResponse(raw) {
@@ -34,10 +35,10 @@ export function validateBookingResponse(raw) {
         console.error('[Validation] LLM response failed schema:', result.error.flatten());
 
         return {
-            success: true,
+            success: false, // ✅ FIXED
             data: {
                 message: "Sorry, I didn't understand that.",
-                speak: "Can you repeat?",
+                speak: "Sorry, I didn't understand that. Can you repeat?",
                 intent: "unknown",
                 data: {
                     service_type: "",

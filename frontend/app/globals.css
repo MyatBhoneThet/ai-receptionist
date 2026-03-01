@@ -1,57 +1,97 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
 
-*,
-*::before,
-*::after {
-    box-sizing: border-box;
-    margin: 0;
-    padding: 0;
-}
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap');
 
 :root {
-    --bg-dark: #0f172a;
-    --bg-card: #1e293b;
-    --accent: #6366f1;
-    --accent-2: #8b5cf6;
-    --text: #e2e8f0;
-    --text-muted: #94a3b8;
-    --border: rgba(255, 255, 255, 0.1);
+    --foreground-rgb: 255, 255, 255;
+    --background-start-rgb: 15, 23, 42;
+    --background-end-rgb: 2, 6, 23;
 }
 
-html,
-body {
-    height: 100%;
+@layer base {
+    body {
+        @apply text-slate-200 antialiased;
+        font-family: 'Outfit', system-ui, sans-serif;
+        color: rgb(var(--foreground-rgb));
+        background: linear-gradient(to bottom,
+                transparent,
+                rgb(var(--background-end-rgb))) rgb(var(--background-start-rgb));
+        min-height: 100vh;
+        overflow-x: hidden;
+    }
+
+    /* Custom scrollbar */
+    ::-webkit-scrollbar {
+        width: 6px;
+    }
+
+    ::-webkit-scrollbar-track {
+        background: transparent;
+    }
+
+    ::-webkit-scrollbar-thumb {
+        @apply bg-slate-700/50 rounded-full;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+        @apply bg-slate-600;
+    }
 }
 
-body {
-    font-family: 'Inter', system-ui, sans-serif;
-    background: var(--bg-dark);
-    color: var(--text);
-    -webkit-font-smoothing: antialiased;
-    overflow: hidden;
+@layer utilities {
+    .glass {
+        @apply bg-white/5 backdrop-blur-md border border-white/10;
+    }
+
+    .glass-dark {
+        @apply bg-slate-950/40 backdrop-blur-xl border border-slate-800/50;
+    }
+
+    .glass-card {
+        @apply bg-slate-900/60 backdrop-blur-lg border border-slate-800/80 shadow-2xl;
+    }
+
+    .text-gradient {
+        @apply bg-clip-text text-transparent bg-gradient-to-r from-primary-400 to-indigo-400;
+    }
+
+    .bg-glow {
+        @apply relative;
+    }
+
+    .bg-glow::before {
+        content: '';
+        @apply absolute -inset-0.5 bg-gradient-to-r from-primary-500 to-indigo-500 rounded-lg blur opacity-20 transition duration-1000 group-hover:opacity-40;
+    }
 }
 
-/* Subtle background grid */
-body::before {
-    content: '';
-    position: fixed;
-    inset: 0;
-    background-image:
-        linear-gradient(rgba(99, 102, 241, 0.04) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(99, 102, 241, 0.04) 1px, transparent 1px);
-    background-size: 40px 40px;
-    pointer-events: none;
+/* Animations */
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(10px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
 }
 
-/* Glowing orb decoration */
-body::after {
-    content: '';
-    position: fixed;
-    top: -200px;
-    right: -200px;
-    width: 600px;
-    height: 600px;
-    border-radius: 50%;
-    background: radial-gradient(circle, rgba(99, 102, 241, 0.12) 0%, transparent 70%);
-    pointer-events: none;
+.animate-fade-in {
+    animation: fadeIn 0.5s ease-out forwards;
+}
+
+.delay-100 {
+    animation-delay: 0.1s;
+}
+
+.delay-200 {
+    animation-delay: 0.2s;
+}
+
+.delay-300 {
+    animation-delay: 0.3s;
 }

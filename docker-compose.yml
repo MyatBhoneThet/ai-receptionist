@@ -1,0 +1,30 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    ports:
+      - "4000:4000"
+    env_file:
+      - .env
+    volumes:
+      - ./backend:/app
+    networks:
+      - ai-receptionist-net
+
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    volumes:
+      - ./frontend:/app
+    depends_on:
+      - backend
+    networks:
+      - ai-receptionist-net
+
+networks:
+  ai-receptionist-net:
+    driver: bridge

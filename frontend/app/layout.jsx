@@ -7,8 +7,10 @@ export const metadata = {
 
 export default function RootLayout({ children }) {
     return (
-        <html lang="en">
-            <body>{children}</body>
+        <html lang="en" className="scroll-smooth">
+            <body className="selection:bg-primary-500/30">
+                {children}
+            </body>
         </html>
     );
 }

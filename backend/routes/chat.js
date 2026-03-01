@@ -95,7 +95,7 @@ router.post('/', async (req, res) => {
             [session_id]
         );
 
-        const history = historyResult.rows;
+        const history = historyResult.rows.slice(-4);
         const today = getTodayFormatted();
 
         // 🧠 LOAD STATE
@@ -140,10 +140,11 @@ router.post('/', async (req, res) => {
             const check = getRequiredFields(intent, data);
 
             if (!check.valid) {
+                const missingText = `I need a bit more info: ${check.missing.join(', ')}`;
                 return res.json({
                     ...parsed,
-                    message: `I need a bit more info: ${check.missing.join(', ')}`,
-                    speak: `Need ${check.missing[0]}`,
+                    message: missingText,
+                    speak: missingText,
                     missing_fields: check.missing,
                 });
             }
@@ -166,9 +167,9 @@ router.post('/', async (req, res) => {
 
             const existing = await query(
                 `SELECT id, google_event_id FROM bookings 
-                 WHERE session_id = $1 AND status = 'pending' AND date = $2
+                 WHERE session_id = $1 AND status = 'pending'
                  ORDER BY created_at DESC LIMIT 1`,
-                [session_id, parsedDate]
+                [session_id]
             );
 
             if (existing.rows.length > 0) {
@@ -237,6 +238,32 @@ router.post('/', async (req, res) => {
                     await query('UPDATE bookings SET google_event_id = $1 WHERE id = $2', [eventId, newBooking.id]);
                 }
             }
+        } else if (intent === 'cancel_booking' || intent === 'cancel') {
+            const existing = await query(
+                `SELECT id, google_event_id FROM bookings 
+                 WHERE session_id = $1 AND status IN ('pending', 'confirmed')
+                 ORDER BY created_at DESC LIMIT 1`,
+                [session_id]
+            );
+
+            if (existing.rows.length > 0) {
+                const bookingId = existing.rows[0].id;
+                const googleEventId = existing.rows[0].google_event_id;
+
+                await query(
+                    "UPDATE bookings SET status = 'cancelled', updated_at = NOW() WHERE id = $1",
+                    [bookingId]
+                );
+
+                if (googleEventId) {
+                    const { cancelEvent } = await import('../services/googleCalendar.js');
+                    await cancelEvent(googleEventId);
+                }
+            }
+
+            // Clear session state on cancellation
+            sessionState.delete(session_id);
+            state = {}; // Important: reset local state variable too
         }
 
         return res.json({
@@ -246,6 +273,37 @@ router.post('/', async (req, res) => {
 
     } catch (err) {
         console.error('[POST /api/chat] Error:', err);
+        return res.status(500).json({ error: 'Something went wrong.' });
+    }
+});
+
+/**
+ * POST /api/chat/confirm
+ * Finalize the most recent pending booking for this session
+ */
+router.post('/confirm', async (req, res) => {
+    const { session_id } = req.body;
+
+    if (!session_id) {
+        return res.status(400).json({ error: 'session_id is required' });
+    }
+
+    try {
+        const result = await query(
+            `UPDATE bookings 
+             SET status = 'confirmed', updated_at = NOW()
+             WHERE session_id = $1 AND status = 'pending'
+             RETURNING id`,
+            [session_id]
+        );
+
+        if (result.rows.length === 0) {
+            return res.json({ success: false, message: 'No pending booking found to confirm.' });
+        }
+
+        return res.json({ success: true, booking_id: result.rows[0].id });
+    } catch (err) {
+        console.error('[POST /api/chat/confirm] Error:', err);
         return res.status(500).json({ error: 'Something went wrong.' });
     }
 });

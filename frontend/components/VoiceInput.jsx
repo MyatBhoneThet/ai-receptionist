@@ -1,31 +1,33 @@
 'use client';
 
 import { useState, useRef, useEffect } from 'react';
-import styles from './VoiceInput.module.css';
 
-/**
- * VoiceInput — microphone button using native Web Speech API
- * @param {{ onTranscript: (text: string) => void, disabled: boolean }} props
- */
-export default function VoiceInput({ onTranscript, disabled }) {
+export default function VoiceInput({ onTranscript, onInterimTranscript, disabled }) {
     const [listening, setListening] = useState(false);
     const [supported, setSupported] = useState(false);
     const recognitionRef = useRef(null);
 
     useEffect(() => {
-        const SpeechRecognition =
-            window.SpeechRecognition || window.webkitSpeechRecognition;
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
         if (SpeechRecognition) {
             setSupported(true);
             const recognition = new SpeechRecognition();
             recognition.lang = 'en-US';
-            recognition.interimResults = false;
+            recognition.interimResults = true;
             recognition.maxAlternatives = 1;
 
             recognition.onresult = (event) => {
-                const transcript = event.results[0][0].transcript;
-                onTranscript(transcript);
-                setListening(false);
+                let finalTranscript = '';
+                let interimTranscript = '';
+                for (let i = event.resultIndex; i < event.results.length; ++i) {
+                    if (event.results[i].isFinal) {
+                        finalTranscript += event.results[i][0].transcript;
+                    } else {
+                        interimTranscript += event.results[i][0].transcript;
+                    }
+                }
+                if (finalTranscript) onTranscript(finalTranscript);
+                if (onInterimTranscript) onInterimTranscript(interimTranscript);
             };
 
             recognition.onerror = (event) => {
@@ -35,35 +37,53 @@ export default function VoiceInput({ onTranscript, disabled }) {
 
             recognition.onend = () => {
                 setListening(false);
+                if (onInterimTranscript) onInterimTranscript('');
             };
 
             recognitionRef.current = recognition;
         }
     }, [onTranscript]);
 
-    const toggle = () => {
+    const toggle = (e) => {
+        e.preventDefault();
+        if (!supported) {
+            alert("Speech recognition not supported in this browser.");
+            return;
+        }
         if (!recognitionRef.current || disabled) return;
-        if (listening) {
-            recognitionRef.current.stop();
+
+        try {
+            if (listening) {
+                recognitionRef.current.stop();
+            } else {
+                recognitionRef.current.start();
+                setListening(true);
+            }
+        } catch (err) {
+            console.error('[VoiceInput] Toggle error:', err);
             setListening(false);
-        } else {
-            recognitionRef.current.start();
-            setListening(true);
         }
     };
 
-    if (!supported) return null;
-
     return (
         <button
-            className={`${styles.mic} ${listening ? styles.active : ''}`}
+            type="button"
+            className={`relative flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl transition-all duration-300 ${listening
+                    ? 'bg-rose-500 text-white shadow-[0_0_20px_rgba(244,63,94,0.4)]'
+                    : 'bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-slate-200 shadow-lg'
+                } ${!supported ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'} active:scale-95 disabled:opacity-50 disabled:grayscale`}
             onClick={toggle}
             disabled={disabled}
-            title={listening ? 'Stop listening' : 'Start voice input'}
+            title={!supported ? 'Speech recognition not supported' : (listening ? 'Stop listening' : 'Start voice input')}
             aria-label={listening ? 'Stop listening' : 'Start voice input'}
         >
-            <span className={styles.icon}>{listening ? '🔴' : '🎙️'}</span>
-            {listening && <span className={styles.pulse} />}
+            {listening && (
+                <span className="absolute inset-0 animate-ping rounded-2xl bg-rose-500/40" />
+            )}
+            <span className="relative z-10 text-xl">
+                {!supported ? '🚫' : (listening ? '⏹️' : '🎙️')}
+            </span>
         </button>
     );
 }
+
