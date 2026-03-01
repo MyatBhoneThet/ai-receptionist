@@ -10,12 +10,13 @@ CREATE TABLE IF NOT EXISTS bookings (
   date            DATE NOT NULL,
   start_time      TIME,                          -- nullable: hotel may not have check-in time
   end_time        TIME,                          -- nullable: hotel checkout stored in check_out_date
-  check_out_date  DATE,                          -- for hotel: LLM puts checkout date here
+  end_date        DATE,                          -- for hotel: LLM puts checkout date here
   people          INTEGER,
   location        TEXT DEFAULT '',
   notes           TEXT DEFAULT '',
   status          TEXT DEFAULT 'pending'
                   CHECK (status IN ('pending', 'confirmed', 'modified', 'cancelled')),
+  google_event_id TEXT,
   created_at      TIMESTAMPTZ DEFAULT NOW(),
   updated_at      TIMESTAMPTZ DEFAULT NOW()
 );

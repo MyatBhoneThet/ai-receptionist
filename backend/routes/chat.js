@@ -2,6 +2,7 @@ import express from 'express';
 import { chat } from '../services/llm.js';
 import { validateBookingResponse } from '../validation/bookingSchema.js';
 import { query } from '../services/db.js';
+import { upsertEvent } from '../services/googleCalendar.js';
 
 const router = express.Router();
 
@@ -148,11 +149,14 @@ router.post('/', async (req, res) => {
             }
 
             const parsedDate = parseDate(data.date);
+            let parsedEndDate = null;
 
             let startTime = parseTime(data.start_time);
             let endTime = parseTime(data.end_time);
 
             if (intent === 'book_hotel') {
+                // For hotels, end_time stored in state is actually the checkout DATE string
+                parsedEndDate = parseDate(data.end_time);
                 startTime = '14:00';
                 endTime = '11:00';
             }
@@ -161,10 +165,10 @@ router.post('/', async (req, res) => {
             if (!endTime) endTime = '13:00';
 
             const existing = await query(
-                `SELECT id FROM bookings 
-                 WHERE session_id = $1 AND status = 'pending' 
+                `SELECT id, google_event_id FROM bookings 
+                 WHERE session_id = $1 AND status = 'pending' AND date = $2
                  ORDER BY created_at DESC LIMIT 1`,
-                [session_id]
+                [session_id, parsedDate]
             );
 
             if (existing.rows.length > 0) {
@@ -172,16 +176,18 @@ router.post('/', async (req, res) => {
                     `UPDATE bookings SET
                         service_type = $1,
                         date = $2,
-                        start_time = $3,
-                        end_time = $4,
-                        people = $5,
-                        location = $6,
-                        notes = $7,
+                        end_date = $3,
+                        start_time = $4,
+                        end_time = $5,
+                        people = $6,
+                        location = $7,
+                        notes = $8,
                         updated_at = NOW()
-                     WHERE id = $8`,
+                     WHERE id = $9`,
                     [
-                        data.service_type,
+                        data.service_type || (intent.startsWith('book_') ? intent.replace('book_', '') : ''),
                         parsedDate,
+                        parsedEndDate,
                         startTime,
                         endTime,
                         data.people,
@@ -190,15 +196,32 @@ router.post('/', async (req, res) => {
                         existing.rows[0].id,
                     ]
                 );
+
+                // 🔄 Sync with Google Calendar
+                const booking = {
+                    id: existing.rows[0].id,
+                    ...data,
+                    service_type: data.service_type || (intent.startsWith('book_') ? intent.replace('book_', '') : ''),
+                    date: parsedDate,
+                    end_date: parsedEndDate,
+                    start_time: startTime,
+                    end_time: endTime,
+                    google_event_id: existing.rows[0].google_event_id,
+                };
+                const eventId = await upsertEvent(booking);
+                if (eventId && eventId !== booking.google_event_id) {
+                    await query('UPDATE bookings SET google_event_id = $1 WHERE id = $2', [eventId, booking.id]);
+                }
             } else {
-                await query(
+                const result = await query(
                     `INSERT INTO bookings 
-                    (session_id, service_type, date, start_time, end_time, people, location, notes)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+                    (session_id, service_type, date, end_date, start_time, end_time, people, location, notes)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
                     [
                         session_id,
-                        data.service_type,
+                        data.service_type || (intent.startsWith('book_') ? intent.replace('book_', '') : ''),
                         parsedDate,
+                        parsedEndDate,
                         startTime,
                         endTime,
                         data.people,
@@ -206,6 +229,13 @@ router.post('/', async (req, res) => {
                         data.notes,
                     ]
                 );
+
+                // 🔄 Sync with Google Calendar
+                const newBooking = result.rows[0];
+                const eventId = await upsertEvent(newBooking);
+                if (eventId) {
+                    await query('UPDATE bookings SET google_event_id = $1 WHERE id = $2', [eventId, newBooking.id]);
+                }
             }
         }
 

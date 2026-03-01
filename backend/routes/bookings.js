@@ -1,5 +1,6 @@
 import express from 'express';
 import { query } from '../services/db.js';
+import { upsertEvent, cancelEvent } from '../services/googleCalendar.js';
 
 const router = express.Router();
 
@@ -29,7 +30,7 @@ router.get('/:session_id', async (req, res) => {
 router.patch('/:id', async (req, res) => {
     const { id } = req.params;
     const fields = req.body;
-    const allowed = ['service_type', 'date', 'start_time', 'end_time', 'people', 'location', 'notes', 'status'];
+    const allowed = ['service_type', 'date', 'end_date', 'start_time', 'end_time', 'people', 'location', 'notes', 'status'];
 
     const updates = [];
     const values = [];
@@ -57,7 +58,16 @@ router.patch('/:id', async (req, res) => {
         if (result.rows.length === 0) {
             return res.status(404).json({ error: 'Booking not found.' });
         }
-        res.json(result.rows[0]);
+
+        // 🔄 Sync with Google Calendar
+        const updatedBooking = result.rows[0];
+        const eventId = await upsertEvent(updatedBooking);
+        if (eventId && eventId !== updatedBooking.google_event_id) {
+            await query('UPDATE bookings SET google_event_id = $1 WHERE id = $2', [eventId, updatedBooking.id]);
+            updatedBooking.google_event_id = eventId;
+        }
+
+        res.json(updatedBooking);
     } catch (err) {
         console.error('[PATCH /api/bookings] Error:', err);
         res.status(500).json({ error: 'Failed to update booking.' });
@@ -78,7 +88,15 @@ router.delete('/:id', async (req, res) => {
         if (result.rows.length === 0) {
             return res.status(404).json({ error: 'Booking not found.' });
         }
-        res.json({ success: true, booking: result.rows[0] });
+
+        // 🔄 Sync with Google Calendar (Delete event if cancelled)
+        const cancelledBooking = result.rows[0];
+        if (cancelledBooking.google_event_id) {
+            await cancelEvent(cancelledBooking.google_event_id);
+            await query('UPDATE bookings SET google_event_id = NULL WHERE id = $1', [id]);
+        }
+
+        res.json({ success: true, booking: cancelledBooking });
     } catch (err) {
         console.error('[DELETE /api/bookings] Error:', err);
         res.status(500).json({ error: 'Failed to cancel booking.' });

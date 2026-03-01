@@ -4,7 +4,7 @@ import 'dotenv/config';
 const { Pool } = pkg;
 
 const pool = new Pool({
-    connectionString: process.env.DATABASE_URL + '?sslmode=verify-full',
+    connectionString: process.env.DATABASE_URL,
     ssl: {
         rejectUnauthorized: true,
     },
