@@ -6,7 +6,7 @@ import { upsertEvent } from '../services/googleCalendar.js';
 
 const router = express.Router();
 
-// 🧠 simple in-memory session state
+// simple in-memory session state
 const sessionState = new Map();
 
 function getTodayFormatted() {
