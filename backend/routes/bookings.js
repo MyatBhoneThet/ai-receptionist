@@ -4,10 +4,7 @@ import { upsertEvent, cancelEvent } from '../services/googleCalendar.js';
 
 const router = express.Router();
 
-/**
- * GET /api/bookings/:session_id
- * Get all bookings for a session
- */
+// GET /api/bookings/:session_id (Get all bookings for a session)
 router.get('/:session_id', async (req, res) => {
     const { session_id } = req.params;
     try {
@@ -22,11 +19,7 @@ router.get('/:session_id', async (req, res) => {
     }
 });
 
-/**
- * PATCH /api/bookings/:id
- * Modify a specific booking
- * Body: any subset of { service_type, date, start_time, end_time, people, location, notes, status }
- */
+// PATCH /api/bookings/:id(Modify a specific booking)
 router.patch('/:id', async (req, res) => {
     const { id } = req.params;
     const fields = req.body;
@@ -74,10 +67,7 @@ router.patch('/:id', async (req, res) => {
     }
 });
 
-/**
- * DELETE /api/bookings/:id
- * Cancel a booking (sets status = 'cancelled', does not hard-delete)
- */
+// DELETE /api/bookings/:idCancel a booking)
 router.delete('/:id', async (req, res) => {
     const { id } = req.params;
     try {

@@ -11,6 +11,7 @@ export const BookingResponseSchema = z.object({
         'check_availability',
         'modify_booking',
         'cancel_booking',
+        'greeting',
         'unknown',
     ]).default('unknown'),
 
@@ -35,7 +36,7 @@ export function validateBookingResponse(raw) {
         console.error('[Validation] LLM response failed schema:', result.error.flatten());
 
         return {
-            success: false, // ✅ FIXED
+            success: false,
             data: {
                 message: "Sorry, I didn't understand that.",
                 speak: "Sorry, I didn't understand that. Can you repeat?",

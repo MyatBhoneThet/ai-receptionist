@@ -163,7 +163,10 @@ router.post('/', async (req, res) => {
             }
 
             if (!startTime) startTime = '12:00';
-            if (!endTime) endTime = '13:00';
+            if (!endTime) {
+                const [h, m] = startTime.split(':').map(Number);
+                endTime = `${String((h + 1) % 24).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+            }
 
             const existing = await query(
                 `SELECT id, google_event_id FROM bookings 

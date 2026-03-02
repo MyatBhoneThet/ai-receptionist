@@ -41,16 +41,24 @@ export async function chat(history, userMessage, today, state = {}) {
     ];
 
     try {
-        const completion = await groq.chat.completions.create({
+        const { data: completion, response } = await groq.chat.completions.create({
             model: 'llama-3.3-70b-versatile',
 
             messages,
 
-            temperature: 0.2, // slightly more stable for structured output
-            max_tokens: 150,  // small bump for safer JSON completion
+            temperature: 0.2,
+            max_tokens: 500,
 
             response_format: { type: 'json_object' },
-        });
+        }).withResponse();
+
+        const remaining = response.headers.get('x-ratelimit-remaining-tokens');
+        const limited = response.headers.get('x-ratelimit-limit-tokens');
+        console.log(`[LLM] Rate Limit: ${remaining} / ${limited} tokens remaining`);
+
+
+        const usage = completion?.usage;
+        console.log(`[LLM] Request Usage: ${usage?.prompt_tokens} prompt, ${usage?.completion_tokens} completion, ${usage?.total_tokens} total tokens`);
 
         const raw = completion?.choices?.[0]?.message?.content;
 
@@ -82,7 +90,7 @@ export async function chat(history, userMessage, today, state = {}) {
         return {
             message: "Sorry, something went wrong. Let's try that again.",
             speak: "Sorry, something went wrong. Let's try that again.",
-            intent: "error",
+            intent: "unknown",
             data: {
                 service_type: "",
                 date: "",

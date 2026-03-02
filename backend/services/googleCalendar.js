@@ -79,16 +79,35 @@ export async function upsertEvent(booking) {
             `Internal ID: ${id}`,
         ].join('\n');
 
+        // Ensure end is AFTER start
+        let finalStartTime = buildDateTime(startDateStr, start_time);
+        let finalEndTime = buildDateTime(endDateStr, end_time || start_time);
+
+        // Simple check: if end <= start on the same day OR if start > end across days
+        if (new Date(finalEndTime) <= new Date(finalStartTime)) {
+            console.log('[Google Calendar] Adjusting invalid time range...');
+            const startDT = new Date(finalStartTime);
+            const adjustedEndDT = new Date(startDT.getTime() + 60 * 60 * 1000); // Default to +1 hour
+
+            // Format back to YYYY-MM-DDTHH:MM (local-ish, since we don't shift TZ here)
+            const year = adjustedEndDT.getFullYear();
+            const month = String(adjustedEndDT.getMonth() + 1).padStart(2, '0');
+            const day = String(adjustedEndDT.getDate()).padStart(2, '0');
+            const hours = String(adjustedEndDT.getHours()).padStart(2, '0');
+            const minutes = String(adjustedEndDT.getMinutes()).padStart(2, '0');
+            finalEndTime = `${year}-${month}-${day}T${hours}:${minutes}`;
+        }
+
         const event = {
             summary,
             location: location || '',
             description,
             start: {
-                dateTime: buildDateTime(startDateStr, start_time),
+                dateTime: finalStartTime,
                 timeZone: 'Asia/Bangkok', // 🔥 FIX: use your real timezone
             },
             end: {
-                dateTime: buildDateTime(endDateStr, end_time || start_time),
+                dateTime: finalEndTime,
                 timeZone: 'Asia/Bangkok',
             },
         };
