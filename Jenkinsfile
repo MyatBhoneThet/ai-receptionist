@@ -1,17 +1,12 @@
 pipeline {
     agent any
 
-    /* 
-       This pipeline requires the "NodeJS" plugin in Jenkins.
-       You must configure a NodeJS tool named "node18" in:
-       Manage Jenkins -> Global Tool Configuration -> NodeJS
-       IMPORTANT: Node version must be v18.17.0+ (using v20 is recommended).
-    */
     tools {
         nodejs 'node20'
     }
 
     stages {
+
         stage('Install Dependencies') {
             steps {
                 script {
@@ -27,20 +22,28 @@ pipeline {
 
         stage('Build Frontend') {
             steps {
-                script {
-                    dir('frontend') {
-                        sh 'npm run build'
-                    }
+                dir('frontend') {
+                    sh 'npm run build'
                 }
             }
         }
 
         stage('Docker Build') {
             steps {
-                script {
-                    sh 'docker build -t ai-receptionist-backend ./backend'
-                    sh 'docker build -t ai-receptionist-frontend ./frontend'
-                }
+                sh 'docker build -t ai-receptionist-backend ./backend'
+                sh 'docker build -t ai-receptionist-frontend ./frontend'
+            }
+        }
+
+        stage('Deploy Containers') {
+            steps {
+                sh 'docker stop ai-backend || true'
+                sh 'docker rm ai-backend || true'
+                sh 'docker stop ai-frontend || true'
+                sh 'docker rm ai-frontend || true'
+
+                sh 'docker run -d -p 5000:5000 --name ai-backend ai-receptionist-backend'
+                sh 'docker run -d -p 3000:3000 --name ai-frontend ai-receptionist-frontend'
             }
         }
     }
