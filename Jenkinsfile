@@ -1,17 +1,16 @@
 pipeline {
     agent any
 
-    environment {
-        NODE_VERSION = '18'
+    /* 
+       This pipeline requires the "NodeJS" plugin in Jenkins.
+       You must configure a NodeJS tool named "node18" in:
+       Manage Jenkins -> Global Tool Configuration -> NodeJS
+    */
+    tools {
+        nodejs 'node18'
     }
 
     stages {
-        stage('Checkout') {
-            steps {
-                checkout scm
-            }
-        }
-
         stage('Install Dependencies') {
             steps {
                 script {
@@ -37,6 +36,7 @@ pipeline {
 
         stage('Docker Build') {
             steps {
+                // Ensure the Jenkins user has permission to use Docker
                 sh 'docker-compose build'
             }
         }
