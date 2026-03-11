@@ -37,8 +37,8 @@ pipeline {
 
         stage('Docker Build') {
             steps {
-                // Ensure the Jenkins user has permission to use Docker
-                sh 'docker-compose build'
+                // Modern Docker installations use 'docker compose' (space)
+                sh 'docker compose build'
             }
         }
     }
