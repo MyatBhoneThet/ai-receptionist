@@ -37,8 +37,10 @@ pipeline {
 
         stage('Docker Build') {
             steps {
-                // Modern Docker installations use 'docker compose' (space)
-                sh 'docker compose build'
+                script {
+                    sh 'docker build -t ai-receptionist-backend ./backend'
+                    sh 'docker build -t ai-receptionist-frontend ./frontend'
+                }
             }
         }
     }

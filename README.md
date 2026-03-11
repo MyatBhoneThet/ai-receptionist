@@ -112,7 +112,7 @@ This project includes a `Jenkinsfile` for automated CI/CD. To use it:
     -   **Checkout**: Pulls the code from the repository.
     -   **Install Dependencies**: Installs `npm` packages for both `backend` and `frontend`.
     -   **Build Frontend**: Runs `npm run build` to verify the Next.js build.
-    -   **Docker Build**: Verifies that the containers can be built using `docker-compose build`.
+    -   **Docker Build**: Verifies that the containers can be built using the `docker build` command.
 
 ## Security
 - **Rate Limiting**: Configured in `backend/middleware/rateLimiter.js` to protect against brute-force and API abuse.
