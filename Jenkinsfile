@@ -5,6 +5,7 @@ pipeline {
        This pipeline requires the "NodeJS" plugin in Jenkins.
        You must configure a NodeJS tool named "node18" in:
        Manage Jenkins -> Global Tool Configuration -> NodeJS
+       IMPORTANT: Node version must be v18.17.0 or HIGHER (required for Next.js).
     */
     tools {
         nodejs 'node18'
