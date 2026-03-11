@@ -105,7 +105,7 @@ docker-compose up --build
 This project includes a `Jenkinsfile` for automated CI/CD. To use it:
 
 1.  **Set up Jenkins**: Ensure Jenkins is installed with the **Pipeline**, **Git**, and **NodeJS** plugins.
-2.  **Node.js**: Configure a NodeJS tool named **'node18'** (v18.17.0+) in *Manage Jenkins > Global Tool Configuration*.
+2.  **Node.js**: Configure a NodeJS tool named **'node20'** (v20.x+) in *Manage Jenkins > Global Tool Configuration*.
 3.  **Docker**: Ensure Docker and Docker Compose are installed on the Jenkins agent, and the Jenkins user has permission to use Docker.
 4.  **Create Pipeline**: Create a new "Pipeline" job in Jenkins and point it to this repository.
 5.  **Run Build**: Jenkins will automatically run the stages defined in the `Jenkinsfile`:

@@ -3,12 +3,12 @@ pipeline {
 
     /* 
        This pipeline requires the "NodeJS" plugin in Jenkins.
-       You must configure a NodeJS tool named "node18" in:
+       You must configure a NodeJS tool named "node20" in:
        Manage Jenkins -> Global Tool Configuration -> NodeJS
-       IMPORTANT: Node version must be v18.17.0 or HIGHER (required for Next.js).
+       IMPORTANT: Node version must be v18.17.0+ (using v20 is recommended).
     */
     tools {
-        nodejs 'node18'
+        nodejs 'node20'
     }
 
     stages {
