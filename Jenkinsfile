@@ -8,7 +8,7 @@ pipeline {
        IMPORTANT: Node version must be v18.17.0+ (using v20 is recommended).
     */
     tools {
-        nodejs 'node18'
+        nodejs 'node20'
     }
 
     stages {

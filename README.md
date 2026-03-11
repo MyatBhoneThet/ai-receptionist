@@ -141,6 +141,26 @@ If you see **"fatal: not in a git directory"** in Jenkins:
     -   Click **"Wipe Out Current Workspace"** (on the left sidebar, likely under "Workspace").
 3.  **Check Git path**: Ensure the "Git" executable is correctly configured in *Manage Jenkins > Global Tool Configuration*.
 
+## 🚨 DEFINITIVE FIX: Resolving "fatal: not in a git directory"
+This error is caused by a bug in the Jenkins Git Plugin's "Lightweight Checkout" feature. To fix it:
+
+1.  **Open Jenkins Job Configuration**.
+2.  Scroll down to the **Pipeline** section.
+3.  Change **Definition** from "Pipeline script from SCM" to **"Pipeline script"**.
+4.  Paste the contents of the `Jenkinsfile` (found in this repo) directly into the **Script** text box.
+5.  **Add** this Stage at the very top of your `stages` block in the script box:
+    ```groovy
+    stage('Checkout') {
+        steps {
+            checkout scm
+        }
+    }
+    ```
+6.  **Uncheck** "Lightweight checkout" (if it's still visible).
+7.  **Save and Build**.
+
+This bypasses the broken plugin phase and starts the job immediately.
+
 ## Security
 - **Rate Limiting**: Configured in `backend/middleware/rateLimiter.js` to protect against brute-force and API abuse.
 - **Helmet**: Protects the app from well-known web vulnerabilities by setting HTTP headers appropriately.
