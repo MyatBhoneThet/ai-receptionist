@@ -133,6 +133,14 @@ And run this on the **host** to grant immediate access (for debugging):
 sudo chmod 666 /var/run/docker.sock
 ```
 
+### 🛠 Troubleshooting Git/SCM Errors
+If you see **"fatal: not in a git directory"** in Jenkins:
+1.  **Lightweight Checkout**: In the Job Configuration, under "Pipeline", ensure **"Lightweight checkout"** is **DISABLED**.
+2.  **Wipe Workspace**: 
+    -   Go to the Job's main page.
+    -   Click **"Wipe Out Current Workspace"** (on the left sidebar, likely under "Workspace").
+3.  **Check Git path**: Ensure the "Git" executable is correctly configured in *Manage Jenkins > Global Tool Configuration*.
+
 ## Security
 - **Rate Limiting**: Configured in `backend/middleware/rateLimiter.js` to protect against brute-force and API abuse.
 - **Helmet**: Protects the app from well-known web vulnerabilities by setting HTTP headers appropriately.
