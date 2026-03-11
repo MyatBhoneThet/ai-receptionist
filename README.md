@@ -4,6 +4,7 @@ version 1.2.0 = speech to text recognition
 version 1.2.1 = migration to tailwind css
 version 1.2.2 = github workflow for neon db(test deployment)
 version 1.2.4 = add rate-limiting and helmet to api routes, ai orb animation
+version 1.2.5 = Jenkins CI/CD integration
 
 # AI Receptionist
 
@@ -98,6 +99,20 @@ Run the entire stack using Docker Compose:
 ```bash
 docker-compose up --build
 ```
+
+## Continuous Integration (Jenkins)
+
+This project includes a `Jenkinsfile` for automated CI/CD. To use it:
+
+1.  **Set up Jenkins**: Ensure Jenkins is installed with the **Pipeline** and **Git** plugins.
+2.  **Node.js**: Ensure Node.js (v18+) is available on the Jenkins agent.
+3.  **Docker**: Ensure Docker and Docker Compose are installed on the Jenkins agent.
+4.  **Create Pipeline**: Create a new "Pipeline" job in Jenkins and point it to this repository.
+5.  **Run Build**: Jenkins will automatically run the stages defined in the `Jenkinsfile`:
+    -   **Checkout**: Pulls the code from the repository.
+    -   **Install Dependencies**: Installs `npm` packages for both `backend` and `frontend`.
+    -   **Build Frontend**: Runs `npm run build` to verify the Next.js build.
+    -   **Docker Build**: Verifies that the containers can be built using `docker-compose build`.
 
 ## Security
 - **Rate Limiting**: Configured in `backend/middleware/rateLimiter.js` to protect against brute-force and API abuse.
