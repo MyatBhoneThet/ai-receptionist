@@ -1,9 +1,18 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
+import React, { useEffect, useRef } from 'react';
 
-export default function ChatWindow({ messages }) {
-    const bottomRef = useRef(null);
+interface Message {
+    role: 'user' | 'assistant';
+    content: string;
+}
+
+interface ChatWindowProps {
+    messages: Message[];
+}
+
+export default function ChatWindow({ messages }: ChatWindowProps) {
+    const bottomRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
         bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -47,8 +56,8 @@ export default function ChatWindow({ messages }) {
                             )}
                             <div
                                 className={`rounded-2xl px-5 py-3.5 text-sm leading-relaxed shadow-sm ${msg.role === 'user'
-                                        ? 'bg-primary-600 text-white rounded-tr-none'
-                                        : 'glass-card text-slate-200 rounded-tl-none'
+                                    ? 'bg-primary-600 text-white rounded-tr-none'
+                                    : 'glass-card text-slate-200 rounded-tl-none'
                                     }`}
                             >
                                 {msg.content}
@@ -61,4 +70,3 @@ export default function ChatWindow({ messages }) {
         </div>
     );
 }
-

@@ -40,7 +40,9 @@ function formatDateLocal(date) {
 
 // Build ISO datetime safely WITHOUT shifting timezone incorrectly
 function buildDateTime(dateStr, timeStr) {
-    const time = timeStr || '12:00:00';
+    let time = timeStr || '12:00:00';
+    // Ensure HH:MM:SS format
+    if (time.length === 5) time += ':00';
     return `${dateStr}T${time}`;
 }
 
@@ -95,7 +97,8 @@ export async function upsertEvent(booking) {
             const day = String(adjustedEndDT.getDate()).padStart(2, '0');
             const hours = String(adjustedEndDT.getHours()).padStart(2, '0');
             const minutes = String(adjustedEndDT.getMinutes()).padStart(2, '0');
-            finalEndTime = `${year}-${month}-${day}T${hours}:${minutes}`;
+            const seconds = String(adjustedEndDT.getSeconds()).padStart(2, '0');
+            finalEndTime = `${year}-${month}-${day}T${hours}:${minutes}:${seconds}`;
         }
 
         const event = {

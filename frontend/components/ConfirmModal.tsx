@@ -1,8 +1,16 @@
 'use client';
 
-import { confirmBooking } from '../lib/api.js';
+import React from 'react';
+import { confirmBooking } from '../lib/api';
 
-export default function ConfirmModal({ sessionId, summary, onConfirm, onCancel }) {
+interface ConfirmModalProps {
+    sessionId: string;
+    summary: any;
+    onConfirm: () => void;
+    onCancel: () => void;
+}
+
+export default function ConfirmModal({ sessionId, summary, onConfirm, onCancel }: ConfirmModalProps) {
     if (!summary) return null;
 
     const handleConfirm = async () => {
@@ -62,4 +70,3 @@ export default function ConfirmModal({ sessionId, summary, onConfirm, onCancel }
         </div>
     );
 }
-

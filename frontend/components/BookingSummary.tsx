@@ -1,6 +1,26 @@
 'use client';
 
-const LABELS = {
+import React from 'react';
+
+interface BookingData {
+    service_type?: 'restaurant' | 'hotel' | 'meeting' | string;
+    date?: string;
+    start_time?: string;
+    end_time?: string;
+    people?: string | number;
+    location?: string;
+    notes?: string;
+    [key: string]: any;
+}
+
+interface BookingSummaryProps {
+    data: BookingData | null;
+    missing_fields?: string[];
+    intent: string | null;
+    confidence: number;
+}
+
+const LABELS: Record<string, string> = {
     service_type: 'Service',
     date: 'Date',
     start_time: 'Start Time',
@@ -10,17 +30,17 @@ const LABELS = {
     notes: 'Notes',
 };
 
-const ICONS = {
+const ICONS: Record<string, string> = {
     restaurant: '🍽️',
     hotel: '🏨',
-    meeting: '📅',
+    meeting: '👥',
 };
 
-export default function BookingSummary({ data, missing_fields = [], intent, confidence }) {
+export default function BookingSummary({ data, missing_fields = [], intent, confidence }: BookingSummaryProps) {
     const bookable = ['book_restaurant', 'book_hotel', 'book_meeting'];
     if (!data || !intent || !bookable.includes(intent)) return null;
 
-    const icon = ICONS[data.service_type] || '📋';
+    const icon = ICONS[data.service_type as string] || '📋';
     const pct = Math.round((confidence || 0) * 100);
 
     return (
@@ -34,7 +54,7 @@ export default function BookingSummary({ data, missing_fields = [], intent, conf
                     <div>
                         <h2 className="text-sm font-bold tracking-tight text-white uppercase">
                             {data.service_type
-                                ? data.service_type.charAt(0).toUpperCase() + data.service_type.slice(1)
+                                ? (data.service_type as string).charAt(0).toUpperCase() + (data.service_type as string).slice(1)
                                 : 'Booking Details'}
                         </h2>
                         <span className="text-[10px] font-medium text-slate-500 uppercase tracking-widest">Live Extraction</span>
@@ -49,8 +69,8 @@ export default function BookingSummary({ data, missing_fields = [], intent, conf
                     <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-800/50">
                         <div
                             className={`h-full transition-all duration-1000 ease-out ${pct >= 85 ? 'bg-gradient-to-r from-emerald-500 to-teal-400' :
-                                    pct >= 60 ? 'bg-gradient-to-r from-amber-500 to-orange-400' :
-                                        'bg-gradient-to-r from-rose-500 to-pink-500'
+                                pct >= 60 ? 'bg-gradient-to-r from-amber-500 to-orange-400' :
+                                    'bg-gradient-to-r from-rose-500 to-pink-500'
                                 }`}
                             style={{ width: `${pct}%` }}
                         />
@@ -89,4 +109,3 @@ export default function BookingSummary({ data, missing_fields = [], intent, conf
         </div>
     );
 }
-

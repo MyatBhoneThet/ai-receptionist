@@ -9,7 +9,7 @@ const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: isProduction
         ? { rejectUnauthorized: false }
-        : false,
+        : (process.env.DATABASE_URL?.includes('sslmode=') ? true : false),
 });
 
 // Handle unexpected idle client errors

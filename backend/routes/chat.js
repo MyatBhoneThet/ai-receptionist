@@ -3,8 +3,12 @@ import { chat } from '../services/llm.js';
 import { validateBookingResponse } from '../validation/bookingSchema.js';
 import { query } from '../services/db.js';
 import { upsertEvent } from '../services/googleCalendar.js';
+import { chatLimiter } from '../middleware/rateLimiter.js';
 
 const router = express.Router();
+
+// Apply chat-specific rate limit (20 req / 1 min per IP)
+router.use(chatLimiter);
 
 // simple in-memory session state
 const sessionState = new Map();
@@ -158,8 +162,8 @@ router.post('/', async (req, res) => {
             if (intent === 'book_hotel') {
                 // For hotels, end_time stored in state is actually the checkout DATE string
                 parsedEndDate = parseDate(data.end_time);
-                startTime = '14:00';
-                endTime = '11:00';
+                startTime = '14:00:00';
+                endTime = '11:00:00';
             }
 
             if (!startTime) startTime = '12:00';

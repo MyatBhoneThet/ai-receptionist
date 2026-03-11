@@ -1,8 +1,12 @@
 import express from 'express';
 import { query } from '../services/db.js';
 import { upsertEvent, cancelEvent } from '../services/googleCalendar.js';
+import { bookingsLimiter } from '../middleware/rateLimiter.js';
 
 const router = express.Router();
+
+// Apply bookings-specific rate limit (30 req / 1 min per IP)
+router.use(bookingsLimiter);
 
 // GET /api/bookings/:session_id (Get all bookings for a session)
 router.get('/:session_id', async (req, res) => {

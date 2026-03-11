@@ -1,10 +1,15 @@
 'use client';
 
-import { useState, useRef } from 'react';
+import React, { useState, useRef, KeyboardEvent, ChangeEvent } from 'react';
 
-export default function TextInput({ onSend, disabled }) {
+interface TextInputProps {
+    onSend: (text: string) => void;
+    disabled?: boolean;
+}
+
+export default function TextInput({ onSend, disabled }: TextInputProps) {
     const [value, setValue] = useState('');
-    const inputRef = useRef(null);
+    const inputRef = useRef<HTMLInputElement>(null);
 
     const handleSend = () => {
         const trimmed = value.trim();
@@ -13,11 +18,15 @@ export default function TextInput({ onSend, disabled }) {
         setValue('');
     };
 
-    const handleKeyDown = (e) => {
+    const handleKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
             handleSend();
         }
+    };
+
+    const handleChange = (e: ChangeEvent<HTMLInputElement>) => {
+        setValue(e.target.value);
     };
 
     return (
@@ -28,7 +37,7 @@ export default function TextInput({ onSend, disabled }) {
                 type="text"
                 placeholder="Message AI Receptionist..."
                 value={value}
-                onChange={(e) => setValue(e.target.value)}
+                onChange={handleChange}
                 onKeyDown={handleKeyDown}
                 disabled={disabled}
                 aria-label="Chat input"
@@ -46,4 +55,3 @@ export default function TextInput({ onSend, disabled }) {
         </div>
     );
 }
-

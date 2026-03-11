@@ -1,11 +1,26 @@
 'use client';
 
-import { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, MouseEvent } from 'react';
 
-export default function VoiceInput({ onTranscript, onInterimTranscript, disabled }) {
+// Extend the Window interface to include SpeechRecognition
+declare global {
+    interface Window {
+        SpeechRecognition: any;
+        webkitSpeechRecognition: any;
+    }
+}
+
+interface VoiceInputProps {
+    onTranscript: (text: string) => void;
+    onInterimTranscript?: (text: string) => void;
+    onListeningChange?: (listening: boolean) => void;
+    disabled?: boolean;
+}
+
+export default function VoiceInput({ onTranscript, onInterimTranscript, onListeningChange, disabled }: VoiceInputProps) {
     const [listening, setListening] = useState(false);
     const [supported, setSupported] = useState(false);
-    const recognitionRef = useRef(null);
+    const recognitionRef = useRef<any>(null);
 
     useEffect(() => {
         const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -16,7 +31,7 @@ export default function VoiceInput({ onTranscript, onInterimTranscript, disabled
             recognition.interimResults = true;
             recognition.maxAlternatives = 1;
 
-            recognition.onresult = (event) => {
+            recognition.onresult = (event: any) => {
                 let finalTranscript = '';
                 let interimTranscript = '';
                 for (let i = event.resultIndex; i < event.results.length; ++i) {
@@ -30,21 +45,23 @@ export default function VoiceInput({ onTranscript, onInterimTranscript, disabled
                 if (onInterimTranscript) onInterimTranscript(interimTranscript);
             };
 
-            recognition.onerror = (event) => {
+            recognition.onerror = (event: any) => {
                 console.error('[SpeechRecognition] Error:', event.error);
                 setListening(false);
+                if (onListeningChange) onListeningChange(false);
             };
 
             recognition.onend = () => {
                 setListening(false);
+                if (onListeningChange) onListeningChange(false);
                 if (onInterimTranscript) onInterimTranscript('');
             };
 
             recognitionRef.current = recognition;
         }
-    }, [onTranscript]);
+    }, [onTranscript, onInterimTranscript]);
 
-    const toggle = (e) => {
+    const toggle = (e: MouseEvent<HTMLButtonElement>) => {
         e.preventDefault();
         if (!supported) {
             alert("Speech recognition not supported in this browser.");
@@ -55,9 +72,12 @@ export default function VoiceInput({ onTranscript, onInterimTranscript, disabled
         try {
             if (listening) {
                 recognitionRef.current.stop();
+                setListening(false);
+                if (onListeningChange) onListeningChange(false);
             } else {
                 recognitionRef.current.start();
                 setListening(true);
+                if (onListeningChange) onListeningChange(true);
             }
         } catch (err) {
             console.error('[VoiceInput] Toggle error:', err);
@@ -69,8 +89,8 @@ export default function VoiceInput({ onTranscript, onInterimTranscript, disabled
         <button
             type="button"
             className={`relative flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl transition-all duration-300 ${listening
-                    ? 'bg-rose-500 text-white shadow-[0_0_20px_rgba(244,63,94,0.4)]'
-                    : 'bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-slate-200 shadow-lg'
+                ? 'bg-rose-500 text-white shadow-[0_0_20px_rgba(244,63,94,0.4)]'
+                : 'bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-slate-200 shadow-lg'
                 } ${!supported ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'} active:scale-95 disabled:opacity-50 disabled:grayscale`}
             onClick={toggle}
             disabled={disabled}
@@ -86,4 +106,3 @@ export default function VoiceInput({ onTranscript, onInterimTranscript, disabled
         </button>
     );
 }
-

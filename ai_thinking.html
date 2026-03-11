@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>AI Thinking</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #05070f;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      font-family: 'Courier New', monospace;
+    }
+    canvas { display: block; }
+    #task-text {
+      margin-top: -30px;
+      color: #7efff5;
+      font-size: 13px;
+      letter-spacing: 0.12em;
+      opacity: 0.85;
+      min-height: 20px;
+      text-align: center;
+      text-shadow: 0 0 10px #7efff5aa;
+      transition: opacity 0.4s ease;
+    }
+    #task-text.fade { opacity: 0; }
+  </style>
+</head>
+<body>
+  <canvas id="c" width="800" height="800"></canvas>
+  <div id="task-text">Initializing neural core..</div>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const W = 800, H = 800, CX = W / 2, CY = H / 2;
+
+// ─── Tasks cycling ───────────────────────────────────────────
+const tasks = [
+  "Analyzing context..",
+  "Searching vector space..",
+  "Optimizing response..",
+  "Running semantic match..",
+  "Fetching memory embeddings..",
+  "Refining token probabilities..",
+  "Collapsing attention heads..",
+  "Synthesizing output..",
+  "Cross-referencing knowledge graph..",
+  "Calculating uncertainty bounds..",
+];
+let taskIdx = 0;
+const taskEl = document.getElementById('task-text');
+
+function cycleTask() {
+  taskEl.classList.add('fade');
+  setTimeout(() => {
+    taskIdx = (taskIdx + 1) % tasks.length;
+    taskEl.textContent = tasks[taskIdx];
+    taskEl.classList.remove('fade');
+  }, 420);
+}
+setInterval(cycleTask, 2200);
+
+// ─── Orb dots ────────────────────────────────────────────────
+const R = 200;          // orb radius
+const NUM_DOTS = 340;
+
+function fibonacciSphere(n) {
+  const pts = [];
+  const golden = Math.PI * (3 - Math.sqrt(5));
+  for (let i = 0; i < n; i++) {
+    const y = 1 - (i / (n - 1)) * 2;
+    const r = Math.sqrt(1 - y * y);
+    const theta = golden * i;
+    pts.push({ ox: Math.cos(theta) * r, oy: y, oz: Math.sin(theta) * r });
+  }
+  return pts;
+}
+
+const baseDots = fibonacciSphere(NUM_DOTS);
+
+// ─── Pulses ──────────────────────────────────────────────────
+const NUM_PULSES = 6;
+const pulses = Array.from({ length: NUM_PULSES }, (_, i) => ({
+  lat: Math.random() * Math.PI,
+  lon: Math.random() * Math.PI * 2,
+  phase: (i / NUM_PULSES) * Math.PI * 2,
+  speed: 0.38 + Math.random() * 0.25,
+}));
+
+// ─── Orbital rings ───────────────────────────────────────────
+const rings = [
+  { tilt: 0.3,  speed: 0.7,  r: R * 1.18, dotCount: 18 },
+  { tilt: 1.1,  speed: -0.5, r: R * 1.28, dotCount: 14 },
+  { tilt: 2.0,  speed: 0.9,  r: R * 1.08, dotCount: 22 },
+];
+
+// ─── Rotate helpers ──────────────────────────────────────────
+function rotateY(x, y, z, a) {
+  return { x: x * Math.cos(a) + z * Math.sin(a), y, z: -x * Math.sin(a) + z * Math.cos(a) };
+}
+function rotateX(x, y, z, a) {
+  return { x, y: y * Math.cos(a) - z * Math.sin(a), z: y * Math.sin(a) + z * Math.cos(a) };
+}
+
+// ─── Main draw loop ──────────────────────────────────────────
+let t = 0;
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+
+  // Deep space background glow
+  const bg = ctx.createRadialGradient(CX, CY, 0, CX, CY, 420);
+  bg.addColorStop(0,   'rgba(10, 30, 80, 0.35)');
+  bg.addColorStop(0.5, 'rgba(5, 10, 30, 0.18)');
+  bg.addColorStop(1,   'rgba(0, 0, 0, 0)');
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, W, H);
+
+  const ry = t * 0.28;
+  const rx = t * 0.13;
+
+  // ── collect orb dot positions ──────────────────────────────
+  const dotData = baseDots.map(d => {
+    let { x, y, z } = rotateY(d.ox * R, d.oy * R, d.oz * R, ry);
+    ({ x, y, z } = rotateX(x, y, z, rx));
+    const depth = (z + R) / (2 * R);          // 0..1
+    const sx = CX + x;
+    const sy = CY + y;
+
+    // pulse brightness: each pulse ripples across surface
+    let pulse = 0;
+    for (const p of pulses) {
+      // dot's spherical coords
+      const dotLat = Math.acos(Math.max(-1, Math.min(1, d.oy)));
+      const dotLon = Math.atan2(d.oz, d.ox);
+      const pLat = p.lat + t * 0.6;
+      const pLon = p.lon + t * p.speed;
+      // great-circle angle
+      const angle = Math.acos(Math.max(-1, Math.min(1,
+        Math.cos(dotLat) * Math.cos(pLat % Math.PI) +
+        Math.sin(dotLat) * Math.sin(pLat % Math.PI) * Math.cos(dotLon - pLon)
+      )));
+      const wave = Math.cos(angle * 4 - t * 3 + p.phase);
+      pulse += Math.max(0, wave) * 0.5;
+    }
+    pulse = Math.min(1, pulse);
+
+    return { sx, sy, depth, pulse, z };
+  });
+
+  // Sort back-to-front
+  dotData.sort((a, b) => a.z - b.z);
+
+  // ── draw orb dots ──────────────────────────────────────────
+  for (const d of dotData) {
+    const alpha  = 0.15 + d.depth * 0.55 + d.pulse * 0.35;
+    const radius = 1.0  + d.depth * 1.8  + d.pulse * 1.5;
+
+    // colour: cyan-blue base, brightens toward white on pulse
+    const r = Math.round(80  + d.depth * 80  + d.pulse * 155);
+    const g = Math.round(180 + d.depth * 40  + d.pulse * 75);
+    const b = Math.round(255);
+
+    if (d.pulse > 0.2) {
+      // glow bloom
+      const glow = ctx.createRadialGradient(d.sx, d.sy, 0, d.sx, d.sy, radius * 5);
+      glow.addColorStop(0,   `rgba(${r},${g},${b},${(alpha * 0.6).toFixed(2)})`);
+      glow.addColorStop(1,   'rgba(0,0,0,0)');
+      ctx.beginPath();
+      ctx.arc(d.sx, d.sy, radius * 5, 0, Math.PI * 2);
+      ctx.fillStyle = glow;
+      ctx.fill();
+    }
+
+    ctx.beginPath();
+    ctx.arc(d.sx, d.sy, radius, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(${r},${g},${b},${alpha.toFixed(2)})`;
+    ctx.fill();
+  }
+
+  // ── orbital ring dots ──────────────────────────────────────
+  for (const ring of rings) {
+    const ringAngle = t * ring.speed;
+    for (let i = 0; i < ring.dotCount; i++) {
+      const phi = (i / ring.dotCount) * Math.PI * 2 + ringAngle;
+      let rx2 = Math.cos(phi) * ring.r;
+      let ry2 = 0;
+      let rz = Math.sin(phi) * ring.r;
+
+      // tilt ring
+      const cosT = Math.cos(ring.tilt), sinT = Math.sin(ring.tilt);
+      const newY = ry2 * cosT - rz * sinT;
+      const newZ = ry2 * sinT + rz * cosT;
+      ry2 = newY; rz = newZ;
+
+      // global orb rotation
+      let p = rotateY(rx2, ry2, rz, ry);
+      p = rotateX(p.x, p.y, p.z, rx);
+
+      const depth = (p.z + ring.r) / (2 * ring.r);
+      const alpha = 0.12 + depth * 0.5;
+      const radius = 1.4 + depth * 1.4;
+
+      // ring-dot pulse
+      const ripple = Math.sin(phi * 3 - t * 2.5) * 0.5 + 0.5;
+      const pr = Math.round(100 + ripple * 155);
+      const pg = Math.round(200 + ripple * 55);
+      const pb = 255;
+      const pa = alpha + ripple * 0.25;
+
+      ctx.beginPath();
+      ctx.arc(CX + p.x, CY + p.y, radius + ripple * 1.2, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(${pr},${pg},${pb},${pa.toFixed(2)})`;
+      ctx.fill();
+    }
+  }
+
+  // ── core inner glow ────────────────────────────────────────
+  const coreBreath = 0.82 + Math.sin(t * 1.4) * 0.18;
+  const core = ctx.createRadialGradient(CX, CY, 0, CX, CY, R * 0.55 * coreBreath);
+  core.addColorStop(0,   `rgba(180,235,255,${(0.08 * coreBreath).toFixed(3)})`);
+  core.addColorStop(0.5, `rgba(80,160,255,${(0.05 * coreBreath).toFixed(3)})`);
+  core.addColorStop(1,   'rgba(0,0,0,0)');
+  ctx.beginPath();
+  ctx.arc(CX, CY, R * 0.55, 0, Math.PI * 2);
+  ctx.fillStyle = core;
+  ctx.fill();
+
+  // ── outer halo ─────────────────────────────────────────────
+  const halo = ctx.createRadialGradient(CX, CY, R * 0.88, CX, CY, R * 1.35);
+  halo.addColorStop(0,   'rgba(50,150,255,0.07)');
+  halo.addColorStop(0.4, 'rgba(30,100,220,0.03)');
+  halo.addColorStop(1,   'rgba(0,0,0,0)');
+  ctx.beginPath();
+  ctx.arc(CX, CY, R * 1.35, 0, Math.PI * 2);
+  ctx.fillStyle = halo;
+  ctx.fill();
+
+  t += 0.012;
+  requestAnimationFrame(draw);
+}
+
+draw();
+</script>
+</body>
+</html>
