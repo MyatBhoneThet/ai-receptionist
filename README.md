@@ -114,6 +114,25 @@ This project includes a `Jenkinsfile` for automated CI/CD. To use it:
     -   **Build Frontend**: Runs `npm run build` to verify the Next.js build.
     -   **Docker Build**: Verifies that the containers can be built using the `docker build` command.
 
+### ⚓ Troubleshooting Docker Permissions
+If the pipeline fails at the "Docker Build" stage with a **Permission Denied** error, follow these steps on the Jenkins server:
+1.  **Add user to group**:
+    ```bash
+    sudo usermod -aG docker jenkins
+    ```
+2.  **Restart Jenkins**:
+    ```bash
+    sudo systemctl restart jenkins
+    ```
+
+**If Jenkins is running inside Docker:**
+Ensure your `docker-compose` or `docker run` command for Jenkins includes:
+`-v /var/run/docker.sock:/var/run/docker.sock`
+And run this on the **host** to grant immediate access (for debugging):
+```bash
+sudo chmod 666 /var/run/docker.sock
+```
+
 ## Security
 - **Rate Limiting**: Configured in `backend/middleware/rateLimiter.js` to protect against brute-force and API abuse.
 - **Helmet**: Protects the app from well-known web vulnerabilities by setting HTTP headers appropriately.
