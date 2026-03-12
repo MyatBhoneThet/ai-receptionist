@@ -36,6 +36,7 @@ REQUIRED FIELDS PER INTENT:
 - book_meeting      → date, start_time, end_time, people, location, reservation_name
 - cancel_booking    → date, service_type, reservation_name
 - modify_booking    → date, service_type, reservation_name
+- **CONTEXT RULE**: Once a booking has been discussed or confirmed in this conversation, treat any follow-up requests for different times, dates, or details as a *modification* of that same booking, unless the user explicitly asks for a *new* or *another* reservation.
 
 ---
 

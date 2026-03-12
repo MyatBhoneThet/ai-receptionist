@@ -201,13 +201,15 @@ router.post('/', async (req, res) => {
             // If we don't have a target ID in state, look for a pending one in this session
             if (!targetId) {
                 const existing = await query(
-                    `SELECT id, google_event_id, status FROM bookings 
-                     WHERE session_id = $1 AND status = 'pending'
+                    `SELECT id, google_event_id, status, service_type, date, start_time, end_time, people, location, notes, reservation_name FROM bookings 
+                     WHERE session_id = $1 AND status IN ('pending', 'confirmed', 'modified')
                      ORDER BY created_at DESC LIMIT 1`,
                     [session_id]
                 );
                 if (existing.rows.length > 0) {
                     targetId = existing.rows[0].id;
+                    // Keep existing values as defaults if not in current state
+                    state = { ...existing.rows[0], ...state };
                 }
             }
 
@@ -262,6 +264,9 @@ router.post('/', async (req, res) => {
                 );
 
                 // 🔄 Premature Sync Removed: confirmation now happens in /confirm
+                const newBooking = result.rows[0];
+                state = { ...state, ...newBooking };
+                sessionState.set(session_id, state);
             }
         } else if (intent === 'modify_booking') {
             const check = {
@@ -299,7 +304,8 @@ router.post('/', async (req, res) => {
 
             if (existing.rows.length > 0) {
                 const booking = existing.rows[0];
-                state = { ...state, ...booking };
+                // Update state with booking info BUT allow new data from current turn to override
+                state = { ...state, ...booking, ...parsed.data };
                 sessionState.set(session_id, state);
 
                 const msg = `I've found your ${booking.service_type} reservation for ${data.date} under the name "${booking.reservation_name}". What would you like to change?`;
@@ -422,15 +428,20 @@ router.post('/confirm', async (req, res) => {
         }
 
         const result = await query(
-            `UPDATE bookings SET status = 'confirmed', updated_at = NOW() WHERE id = $1 RETURNING *`,
-            [bookingId]
+            `UPDATE bookings SET status = $1, updated_at = NOW() WHERE id = $2 RETURNING *`,
+            [targetStatus, bookingId]
         );
 
         if (result.rows.length === 0) {
-            return res.json({ success: false, message: 'No pending booking found to confirm.' });
+            return res.json({ success: false, message: 'No booking found to update.' });
         }
 
         const confirmedBooking = result.rows[0];
+
+        // 🧠 SYNC SESSION STATE (IMPORTANT)
+        let state = sessionState.get(session_id) || {};
+        state = { ...state, ...confirmedBooking };
+        sessionState.set(session_id, state);
 
         // Final Sync with Google Calendar on explicit confirmation
         try {
@@ -443,7 +454,7 @@ router.post('/confirm', async (req, res) => {
                 if (confirmedBooking.google_event_id) {
                     const { cancelEvent } = await import('../services/googleCalendar.js');
                     await cancelEvent(confirmedBooking.google_event_id);
-                    await query('UPDATE bookings SET google_event_id = NULL WHERE id = $2', [confirmedBooking.id]);
+                    await query('UPDATE bookings SET google_event_id = NULL WHERE id = $1', [confirmedBooking.id]);
                 }
             }
         } catch (syncErr) {

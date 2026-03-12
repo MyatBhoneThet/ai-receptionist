@@ -24,17 +24,17 @@ async function testAuth() {
         console.log('Auth key set?', !!auth.key);
         console.log('Requesting access token...');
         const token = await auth.getAccessToken();
-        console.log('✅ Access Token obtained!');
+        console.log('Access Token obtained!');
 
         const calendar = google.calendar({ version: 'v3', auth });
         console.log('Listing calendars...');
         const res = await calendar.calendarList.list();
-        console.log('✅ Success! Found ' + (res.data.items?.length || 0) + ' calendars.');
+        console.log('Success! Found ' + (res.data.items?.length || 0) + ' calendars.');
         if (res.data.items) {
             res.data.items.forEach(c => console.log(`- ${c.summary} (${c.id})`));
         }
     } catch (error) {
-        console.error('❌ Auth Test Failed:');
+        console.error('Auth Test Failed:');
         console.error(error.message);
     }
 }

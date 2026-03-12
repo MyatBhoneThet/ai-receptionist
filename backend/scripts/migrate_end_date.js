@@ -13,12 +13,12 @@ async function migrate() {
 
     try {
         await pool.query('ALTER TABLE bookings RENAME COLUMN check_out_date TO end_date;');
-        console.log('✅ Column renamed successfully!');
+        console.log('Column renamed successfully!');
     } catch (err) {
         if (err.code === '42703') {
-            console.log('ℹ️ Column end_date already exists or check_out_date is missing (already migrated).');
+            console.log('Column end_date already exists or check_out_date is missing (already migrated).');
         } else {
-            console.error('❌ Migration failed:', err.message);
+            console.error('Migration failed:', err.message);
             throw err;
         }
     } finally {
@@ -27,6 +27,6 @@ async function migrate() {
 }
 
 migrate().catch((err) => {
-    console.error('❌ Migration failed:', err);
+    console.error('Migration failed:', err);
     process.exit(1);
 });

@@ -18,11 +18,11 @@ async function initDb() {
 
     console.log('🔄 Initializing database...');
     await pool.query(sql);
-    console.log('✅ Database initialized successfully!');
+    console.log('Database initialized successfully!');
     await pool.end();
 }
 
 initDb().catch((err) => {
-    console.error('❌ Database initialization failed:', err);
+    console.error('Database initialization failed:', err);
     process.exit(1);
 });

@@ -13,9 +13,9 @@ async function addColumn() {
 
     try {
         await pool.query('ALTER TABLE bookings ADD COLUMN IF NOT EXISTS end_date DATE;');
-        console.log('✅ Column end_date added successfully!');
+        console.log('Column end_date added successfully!');
     } catch (err) {
-        console.error('❌ Failed to add column:', err.message);
+        console.error('Failed to add column:', err.message);
         throw err;
     } finally {
         await pool.end();
@@ -23,6 +23,6 @@ async function addColumn() {
 }
 
 addColumn().catch((err) => {
-    console.error('❌ Action failed:', err);
+    console.error('Action failed:', err);
     process.exit(1);
 });

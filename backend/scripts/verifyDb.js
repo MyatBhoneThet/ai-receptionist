@@ -14,7 +14,7 @@ async function verify() {
         console.log('Columns in bookings table:');
         res.rows.forEach(row => console.log(`- ${row.column_name}`));
     } catch (err) {
-        console.error('❌ Verification failed:', err.message);
+        console.error('Verification failed:', err.message);
     } finally {
         await pool.end();
     }

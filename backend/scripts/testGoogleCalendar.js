@@ -2,7 +2,7 @@ import { upsertEvent, cancelEvent } from '../services/googleCalendar.js';
 import 'dotenv/config';
 
 async function testSync() {
-    console.log('🧪 Testing Google Calendar Sync...');
+    console.log('Testing Google Calendar Sync...');
 
     try {
         console.log('0. Testing Authentication...');
@@ -12,7 +12,7 @@ async function testSync() {
         console.log('Key length:', process.env.GOOGLE_PRIVATE_KEY?.length);
         console.log('Calendar ID:', process.env.GOOGLE_CALENDAR_ID);
     } catch (authError) {
-        console.error('❌ Auth debug failed:', authError.message);
+        console.error('Auth debug failed:', authError.message);
     }
     const mockBooking = {
         id: 999,
@@ -31,7 +31,7 @@ async function testSync() {
         const eventId = await upsertEvent(mockBooking);
 
         if (eventId) {
-            console.log(`✅ Event created successfully! ID: ${eventId}`);
+            console.log(`Event created successfully! ID: ${eventId}`);
             mockBooking.google_event_id = eventId;
 
             console.log('2. Testing event update...');
@@ -39,19 +39,19 @@ async function testSync() {
             const updatedId = await upsertEvent(mockBooking);
 
             if (updatedId === eventId) {
-                console.log('✅ Event updated successfully!');
+                console.log('Event updated successfully!');
 
                 console.log('3. Testing event deletion...');
                 await cancelEvent(eventId);
-                console.log('✅ Event deleted successfully!');
+                console.log('Event deleted successfully!');
             } else {
-                console.error('❌ Event ID mismatch after update');
+                console.error('Event ID mismatch after update');
             }
         } else {
-            console.log('⚠️ Event sync skipped or failed (check credentials in .env)');
+            console.log('Event sync skipped or failed (check credentials in .env)');
         }
     } catch (error) {
-        console.error('❌ Test failed:', error);
+        console.error('Test failed:', error);
     }
 }
 
