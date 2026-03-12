@@ -1,6 +1,4 @@
--- ============================================================
 -- AI Receptionist — PostgreSQL Schema
--- ============================================================
 
 -- Unified bookings table for all service types
 CREATE TABLE IF NOT EXISTS bookings (
@@ -8,12 +6,13 @@ CREATE TABLE IF NOT EXISTS bookings (
   session_id      TEXT NOT NULL,
   service_type    TEXT NOT NULL CHECK (service_type IN ('restaurant', 'hotel', 'meeting')),
   date            DATE NOT NULL,
-  start_time      TIME,                          -- nullable: hotel may not have check-in time
-  end_time        TIME,                          -- nullable: hotel checkout stored in check_out_date
-  end_date        DATE,                          -- for hotel: LLM puts checkout date here
+  start_time      TIME, -- nullable: hotel may not have check-in time
+  end_time        TIME, -- nullable: hotel checkout stored in check_out_date
+  end_date        DATE, -- for hotel: LLM puts checkout date here
   people          INTEGER,
   location        TEXT DEFAULT '',
   notes           TEXT DEFAULT '',
+  reservation_name TEXT,
   status          TEXT DEFAULT 'pending'
                   CHECK (status IN ('pending', 'confirmed', 'modified', 'cancelled')),
   google_event_id TEXT,

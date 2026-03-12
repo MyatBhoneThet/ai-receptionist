@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useAudioProcessor } from '../lib/useAudioProcessor';
 
 interface ThinkingOrbProps {
@@ -47,8 +47,11 @@ export default function ThinkingOrb({ isThinking, isListening = false, trigger =
     const rafRef = useRef<number | null>(null);
     const taskIdxRef = useRef(0);
     const taskIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-    const taskElRef = useRef<HTMLDivElement>(null);
     const overlayRef = useRef<HTMLDivElement>(null);
+
+    // Task state
+    const [currentTask, setCurrentTask] = useState("");
+    const [taskOpacity, setTaskOpacity] = useState(0);
 
     // Canvas animation
     useEffect(() => {
@@ -255,21 +258,22 @@ export default function ThinkingOrb({ isThinking, isListening = false, trigger =
 
     // Task text cycling
     useEffect(() => {
-        if (isListening) return; // Handled by separate logic
+        if (isListening || !isThinking) {
+            setTaskOpacity(0);
+            return;
+        }
+        
         const tasks = trigger === 'voice' ? VOICE_TASKS : TEXT_TASKS;
-        const el = taskElRef.current;
-        if (!el) return;
-
         taskIdxRef.current = 0;
-        el.style.opacity = '1';
-        el.textContent = tasks[0];
+        setCurrentTask(tasks[0]);
+        setTaskOpacity(1);
 
         taskIntervalRef.current = setInterval(() => {
-            el.style.opacity = '0';
+            setTaskOpacity(0);
             setTimeout(() => {
                 taskIdxRef.current = (taskIdxRef.current + 1) % tasks.length;
-                el.textContent = tasks[taskIdxRef.current];
-                el.style.opacity = '1';
+                setCurrentTask(tasks[taskIdxRef.current]);
+                setTaskOpacity(1);
             }, 400);
         }, 2200);
 
@@ -305,7 +309,6 @@ export default function ThinkingOrb({ isThinking, isListening = false, trigger =
                 }}
             />
             <div
-                ref={taskElRef}
                 style={{
                     marginTop: '-48px',
                     color: '#7efff5',
@@ -331,8 +334,11 @@ export default function ThinkingOrb({ isThinking, isListening = false, trigger =
                         <span className="tracking-widest uppercase text-xs opacity-80">Listening to your voice...</span>
                     </>
                 ) : (
-                    <span className="italic opacity-90 animate-pulse">
-                        {trigger === 'voice' ? 'Transcribing...' : 'Thinking...'}
+                    <span 
+                        className="italic opacity-90 animate-pulse"
+                        style={{ opacity: taskOpacity, transition: 'opacity 0.4s ease' }}
+                    >
+                        {trigger === 'voice' ? 'Transcribing...' : (currentTask || 'Thinking...')}
                     </span>
                 )}
             </div>

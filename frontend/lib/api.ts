@@ -38,8 +38,8 @@ export async function sendMessage(session_id: string, message: string): Promise<
 /**
  * Confirm the pending booking for a session
  */
-export async function confirmBooking(session_id: string): Promise<any> {
-    const { data } = await api.post('/api/chat/confirm', { session_id });
+export async function confirmBooking(session_id: string, action?: 'confirm' | 'cancel'): Promise<any> {
+    const { data } = await api.post('/api/chat/confirm', { session_id, action });
     return data;
 }
 

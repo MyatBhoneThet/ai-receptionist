@@ -43,16 +43,18 @@ interface Message {
 }
 
 export default function Page() {
-    const [sessionId] = useState<string>(() => {
-        if (typeof window !== 'undefined') {
-            const stored = localStorage.getItem('ai_receptionist_session');
-            if (stored) return stored;
+    const [sessionId, setSessionId] = useState<string>('');
+
+    useEffect(() => {
+        const stored = localStorage.getItem('ai_receptionist_session');
+        if (stored) {
+            setSessionId(stored);
+        } else {
             const newId = uuidv4();
             localStorage.setItem('ai_receptionist_session', newId);
-            return newId;
+            setSessionId(newId);
         }
-        return uuidv4();
-    });
+    }, []);
 
     const [messages, setMessages] = useState<Message[]>([]);
     const [loading, setLoading] = useState<boolean>(false);
@@ -90,6 +92,11 @@ export default function Page() {
             if (bookable.includes(response.intent) && (!response.missing_fields || response.missing_fields.length === 0)) {
                 setTimeout(() => setShowConfirm(true), 800);
             }
+
+            // @ts-ignore
+            if (response.show_cancel_confirm) {
+                setTimeout(() => setShowConfirm(true), 800);
+            }
         } catch (err) {
             console.error('[handleSend] Error:', err);
             const errorMsg = "Sorry, something went wrong. Please try again.";
@@ -112,8 +119,11 @@ export default function Page() {
     }, [handleSend]);
 
     const handleConfirmed = () => {
+        const isCancel = currentIntent === 'cancel_booking' || currentIntent === 'cancel';
         setShowConfirm(false);
-        const confirmMsg = '✅ Your booking is confirmed! Is there anything else?';
+        const confirmMsg = isCancel 
+            ? '🗑️ Your booking has been cancelled. Is there anything else I can help with?'
+            : '✅ Your booking is confirmed! Is there anything else?';
         setMessages((prev) => [...prev, { role: 'assistant', content: confirmMsg }]);
         speakText(confirmMsg);
         setCurrentData(null);

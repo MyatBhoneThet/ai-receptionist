@@ -15,8 +15,8 @@ INTENTS:
 - book_hotel        → Reserve a hotel room.
 - book_meeting      → Schedule a meeting room.
 - check_availability → Check if a slot/room is free.
-- modify_booking    → Change an existing reservation.
-- cancel_booking    → Cancel a reservation.
+- cancel_booking    → Cancel a reservation. (REQUIRED: date, service_type, reservation_name)
+- modify_booking    → Change an existing reservation. (REQUIRED: date, service_type, reservation_name)
 - unknown           → Cannot determine intent.
 
 ---
@@ -31,9 +31,11 @@ STRICT RULES:
 ---
 
 REQUIRED FIELDS PER INTENT:
-- book_restaurant   → date, start_time, people
-- book_hotel        → date (check-in), end_time (check-out date), people
-- book_meeting      → date, start_time, end_time, people, location
+- book_restaurant   → date, start_time, people, reservation_name
+- book_hotel        → date (check-in), end_time (check-out date), people, reservation_name
+- book_meeting      → date, start_time, end_time, people, location, reservation_name
+- cancel_booking    → date, service_type, reservation_name
+- modify_booking    → date, service_type, reservation_name
 
 ---
 
@@ -56,7 +58,8 @@ FORMAT (STRICT JSON):
     "end_time": "HH:MM or ''",
     "people": number or null,
     "location": "string",
-    "notes": "string"
+    "notes": "string",
+    "reservation_name": "string (name for identification)"
   },
   "missing_fields": ["field_name"],
   "confidence": number

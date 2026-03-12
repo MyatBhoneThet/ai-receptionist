@@ -51,6 +51,7 @@ function getRequiredFields(intent, data) {
                     !data.date && 'date',
                     !data.start_time && 'start_time',
                     (!data.people && data.people !== 0) && 'people',
+                    !data.reservation_name && 'reservation name',
                 ].filter(Boolean),
             };
 
@@ -61,6 +62,7 @@ function getRequiredFields(intent, data) {
                     !data.date && 'check-in date',
                     !data.end_time && 'check-out date',
                     (!data.people && data.people !== 0) && 'guests',
+                    !data.reservation_name && 'reservation name',
                 ].filter(Boolean),
             };
 
@@ -78,9 +80,31 @@ function getRequiredFields(intent, data) {
                     !data.end_time && 'end_time',
                     (!data.people && data.people !== 0) && 'people',
                     !data.location && 'location',
+                    !data.reservation_name && 'reservation name',
                 ].filter(Boolean),
             };
 
+        case 'modify_booking':
+            return {
+                valid: data.date && data.service_type && data.reservation_name,
+                missing: [
+                    !data.date && 'date',
+                    !data.service_type && 'type of reservation',
+                    !data.reservation_name && 'reservation name',
+                ].filter(Boolean),
+            };
+            
+        case 'cancel_booking':
+        case 'cancel':
+            return {
+                valid: data.date && data.service_type && data.reservation_name,
+                missing: [
+                    !data.date && 'date',
+                    !data.service_type && 'type of reservation',
+                    !data.reservation_name && 'reservation name',
+                ].filter(Boolean),
+            };
+            
         default:
             return { valid: false, missing: [] };
     }
@@ -172,15 +196,23 @@ router.post('/', async (req, res) => {
                 endTime = `${String((h + 1) % 24).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
             }
 
-            const existing = await query(
-                `SELECT id, google_event_id FROM bookings 
-                 WHERE session_id = $1 AND status = 'pending'
-                 ORDER BY created_at DESC LIMIT 1`,
-                [session_id]
-            );
+            let targetId = state.id;
 
-            if (existing.rows.length > 0) {
-                await query(
+            // If we don't have a target ID in state, look for a pending one in this session
+            if (!targetId) {
+                const existing = await query(
+                    `SELECT id, google_event_id, status FROM bookings 
+                     WHERE session_id = $1 AND status = 'pending'
+                     ORDER BY created_at DESC LIMIT 1`,
+                    [session_id]
+                );
+                if (existing.rows.length > 0) {
+                    targetId = existing.rows[0].id;
+                }
+            }
+
+            if (targetId) {
+                const updated = await query(
                     `UPDATE bookings SET
                         service_type = $1,
                         date = $2,
@@ -190,8 +222,10 @@ router.post('/', async (req, res) => {
                         people = $6,
                         location = $7,
                         notes = $8,
+                        reservation_name = $9,
+                        status = CASE WHEN status = 'confirmed' THEN 'modified' ELSE status END,
                         updated_at = NOW()
-                     WHERE id = $9`,
+                     WHERE id = $10 RETURNING *`,
                     [
                         data.service_type || (intent.startsWith('book_') ? intent.replace('book_', '') : ''),
                         parsedDate,
@@ -201,30 +235,18 @@ router.post('/', async (req, res) => {
                         data.people,
                         data.location,
                         data.notes,
-                        existing.rows[0].id,
+                        data.reservation_name,
+                        targetId,
                     ]
                 );
+                state = { ...state, ...updated.rows[0] };
 
-                // 🔄 Sync with Google Calendar
-                const booking = {
-                    id: existing.rows[0].id,
-                    ...data,
-                    service_type: data.service_type || (intent.startsWith('book_') ? intent.replace('book_', '') : ''),
-                    date: parsedDate,
-                    end_date: parsedEndDate,
-                    start_time: startTime,
-                    end_time: endTime,
-                    google_event_id: existing.rows[0].google_event_id,
-                };
-                const eventId = await upsertEvent(booking);
-                if (eventId && eventId !== booking.google_event_id) {
-                    await query('UPDATE bookings SET google_event_id = $1 WHERE id = $2', [eventId, booking.id]);
-                }
+                // 🔄 Premature Sync Removed: confirmation now happens in /confirm
             } else {
                 const result = await query(
                     `INSERT INTO bookings 
-                    (session_id, service_type, date, end_date, start_time, end_time, people, location, notes)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+                    (session_id, service_type, date, end_date, start_time, end_time, people, location, notes, reservation_name, status)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending') RETURNING *`,
                     [
                         session_id,
                         data.service_type || (intent.startsWith('book_') ? intent.replace('book_', '') : ''),
@@ -235,42 +257,124 @@ router.post('/', async (req, res) => {
                         data.people,
                         data.location,
                         data.notes,
+                        data.reservation_name,
                     ]
                 );
 
-                // 🔄 Sync with Google Calendar
-                const newBooking = result.rows[0];
-                const eventId = await upsertEvent(newBooking);
-                if (eventId) {
-                    await query('UPDATE bookings SET google_event_id = $1 WHERE id = $2', [eventId, newBooking.id]);
-                }
+                // 🔄 Premature Sync Removed: confirmation now happens in /confirm
             }
-        } else if (intent === 'cancel_booking' || intent === 'cancel') {
+        } else if (intent === 'modify_booking') {
+            const check = {
+                valid: data.date && data.service_type && data.reservation_name,
+                missing: [
+                    !data.date && 'date',
+                    !data.service_type && 'type of reservation',
+                    !data.reservation_name && 'reservation name',
+                ].filter(Boolean),
+            };
+
+            if (!check.valid) {
+                const missingText = `To find your booking, I'll need a few details: ${check.missing.join(', ')}`;
+                return res.json({
+                    ...parsed,
+                    message: missingText,
+                    speak: missingText,
+                    missing_fields: check.missing,
+                });
+            }
+
+            const parsedDate = parseDate(data.date);
+            const serviceType = data.service_type.toLowerCase().trim();
+            const reservationName = data.reservation_name.toLowerCase().trim();
+
             const existing = await query(
-                `SELECT id, google_event_id FROM bookings 
-                 WHERE session_id = $1 AND status IN ('pending', 'confirmed')
+                `SELECT * FROM bookings 
+                 WHERE date = $1 
+                 AND service_type = $2 
+                 AND LOWER(reservation_name) = $3
+                 AND status IN ('pending', 'confirmed', 'modified')
                  ORDER BY created_at DESC LIMIT 1`,
-                [session_id]
+                [parsedDate, serviceType, reservationName]
             );
 
             if (existing.rows.length > 0) {
-                const bookingId = existing.rows[0].id;
-                const googleEventId = existing.rows[0].google_event_id;
+                const booking = existing.rows[0];
+                state = { ...state, ...booking };
+                sessionState.set(session_id, state);
 
-                await query(
-                    "UPDATE bookings SET status = 'cancelled', updated_at = NOW() WHERE id = $1",
-                    [bookingId]
-                );
+                const msg = `I've found your ${booking.service_type} reservation for ${data.date} under the name "${booking.reservation_name}". What would you like to change?`;
+                return res.json({
+                    ...parsed,
+                    message: msg,
+                    speak: msg,
+                    data: state
+                });
+            } else {
+                const msg = `I couldn't find a ${data.service_type} reservation for ${data.date} under the name "${data.reservation_name}". Could you double-check the details?`;
+                return res.json({
+                    ...parsed,
+                    message: msg,
+                    speak: msg,
+                    data: state
+                });
+            }
+        } else if (intent === 'cancel_booking' || intent === 'cancel') {
+            const check = {
+                valid: data.date && data.service_type && data.reservation_name,
+                missing: [
+                    !data.date && 'date',
+                    !data.service_type && 'type of reservation',
+                    !data.reservation_name && 'reservation name',
+                ].filter(Boolean),
+            };
 
-                if (googleEventId) {
-                    const { cancelEvent } = await import('../services/googleCalendar.js');
-                    await cancelEvent(googleEventId);
-                }
+            if (!check.valid) {
+                const missingText = `To find your booking, I'll need a few details: ${check.missing.join(', ')}`;
+                return res.json({
+                    ...parsed,
+                    message: missingText,
+                    speak: missingText,
+                    missing_fields: check.missing,
+                });
             }
 
-            // Clear session state on cancellation
-            sessionState.delete(session_id);
-            state = {}; // Important: reset local state variable too
+            const parsedDate = parseDate(data.date);
+            const serviceType = data.service_type.toLowerCase().trim();
+            const reservationName = data.reservation_name.toLowerCase().trim();
+
+            const existing = await query(
+                `SELECT * FROM bookings 
+                 WHERE date = $1 
+                 AND service_type = $2 
+                 AND LOWER(reservation_name) = $3
+                 AND status IN ('pending', 'confirmed', 'modified')
+                 ORDER BY created_at DESC LIMIT 1`,
+                [parsedDate, serviceType, reservationName]
+            );
+
+            if (existing.rows.length > 0) {
+                const booking = existing.rows[0];
+                // Return found booking data so frontend can show summary
+                state = { ...state, ...booking };
+                sessionState.set(session_id, state);
+
+                const msg = `I've found your ${booking.service_type} reservation for ${data.date} under the name "${booking.reservation_name}". Would you like to proceed with the cancellation?`;
+                return res.json({
+                    ...parsed,
+                    message: msg,
+                    speak: msg,
+                    data: state,
+                    show_cancel_confirm: true // New flag for frontend
+                });
+            } else {
+                const msg = `I'm so sorry, but I couldn't find a ${data.service_type} reservation for ${data.date} under the name "${data.reservation_name}". Could you double-check the details for me?`;
+                return res.json({
+                    ...parsed,
+                    message: msg,
+                    speak: msg,
+                    data: state
+                });
+            }
         }
 
         return res.json({
@@ -289,26 +393,68 @@ router.post('/', async (req, res) => {
  * Finalize the most recent pending booking for this session
  */
 router.post('/confirm', async (req, res) => {
-    const { session_id } = req.body;
+    const { session_id, action } = req.body;
 
     if (!session_id) {
         return res.status(400).json({ error: 'session_id is required' });
     }
 
     try {
-        const result = await query(
-            `UPDATE bookings 
-             SET status = 'confirmed', updated_at = NOW()
-             WHERE session_id = $1 AND status = 'pending'
-             RETURNING id`,
+        // Find the latest active booking
+        const latest = await query(
+            `SELECT id, status FROM bookings 
+             WHERE session_id = $1 AND status IN ('pending', 'confirmed', 'modified')
+             ORDER BY created_at DESC LIMIT 1`,
             [session_id]
+        );
+
+        if (latest.rows.length === 0) {
+            return res.json({ success: false, message: 'No active booking found.' });
+        }
+
+        const bookingId = latest.rows[0].id;
+        const currentStatus = latest.rows[0].status;
+
+        // Determine target status
+        let targetStatus = 'confirmed';
+        if (action === 'cancel') {
+            targetStatus = 'cancelled';
+        } else if (currentStatus === 'confirmed') {
+            // Already confirmed, no need to update status unless it was 'modified'
+            return res.json({ success: true, booking_id: bookingId, message: 'Already confirmed.' });
+        }
+
+        const result = await query(
+            `UPDATE bookings SET status = 'confirmed', updated_at = NOW() WHERE id = $1 RETURNING *`,
+            [bookingId]
         );
 
         if (result.rows.length === 0) {
             return res.json({ success: false, message: 'No pending booking found to confirm.' });
         }
 
-        return res.json({ success: true, booking_id: result.rows[0].id });
+        const confirmedBooking = result.rows[0];
+
+        // 🔄 Final Sync with Google Calendar on explicit confirmation
+        try {
+            if (confirmedBooking.status === 'confirmed') {
+                const eventId = await upsertEvent(confirmedBooking);
+                if (eventId) {
+                    await query('UPDATE bookings SET google_event_id = $1 WHERE id = $2', [eventId, confirmedBooking.id]);
+                }
+            } else if (confirmedBooking.status === 'cancelled') {
+                if (confirmedBooking.google_event_id) {
+                    const { cancelEvent } = await import('../services/googleCalendar.js');
+                    await cancelEvent(confirmedBooking.google_event_id);
+                    await query('UPDATE bookings SET google_event_id = NULL WHERE id = $2', [confirmedBooking.id]);
+                }
+            }
+        } catch (syncErr) {
+            console.error('[POST /api/chat/confirm] Calendar Sync Error:', syncErr);
+            // We still consider the booking confirmed in our DB even if calendar fails
+        }
+
+        return res.json({ success: true, booking_id: confirmedBooking.id });
     } catch (err) {
         console.error('[POST /api/chat/confirm] Error:', err);
         return res.status(500).json({ error: 'Something went wrong.' });

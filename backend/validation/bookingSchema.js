@@ -23,6 +23,7 @@ export const BookingResponseSchema = z.object({
         people: z.number().nullable().optional(),
         location: z.string().default(""),
         notes: z.string().default(""),
+        reservation_name: z.string().default(""),
     }).default({}),
 
     missing_fields: z.array(z.string()).default([]),
@@ -49,6 +50,7 @@ export function validateBookingResponse(raw) {
                     people: null,
                     location: "",
                     notes: "",
+                    reservation_name: "",
                 },
                 missing_fields: [],
                 confidence: 0,

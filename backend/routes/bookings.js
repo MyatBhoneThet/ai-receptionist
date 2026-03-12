@@ -27,7 +27,7 @@ router.get('/:session_id', async (req, res) => {
 router.patch('/:id', async (req, res) => {
     const { id } = req.params;
     const fields = req.body;
-    const allowed = ['service_type', 'date', 'end_date', 'start_time', 'end_time', 'people', 'location', 'notes', 'status'];
+    const allowed = ['service_type', 'date', 'end_date', 'start_time', 'end_time', 'people', 'location', 'notes', 'status', 'reservation_name'];
 
     const updates = [];
     const values = [];

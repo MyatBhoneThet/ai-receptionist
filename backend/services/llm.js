@@ -14,6 +14,7 @@ export async function chat(history, userMessage, today, state = {}) {
         end_time: state?.end_time || "",
         people: state?.people ?? null,
         location: state?.location || "",
+        reservation_name: state?.reservation_name || "",
     };
 
     // Limit history safely
@@ -79,6 +80,7 @@ export async function chat(history, userMessage, today, state = {}) {
                 people: parsed.data?.people ?? null,
                 location: parsed.data?.location || "",
                 notes: parsed.data?.notes || "",
+                reservation_name: parsed.data?.reservation_name || "",
             },
             missing_fields: parsed.missing_fields || [],
             confidence: parsed.confidence ?? 0,
@@ -99,6 +101,7 @@ export async function chat(history, userMessage, today, state = {}) {
                 people: null,
                 location: "",
                 notes: "",
+                reservation_name: "",
             },
             missing_fields: [],
             confidence: 0,
