@@ -107,7 +107,7 @@ export async function upsertEvent(booking) {
             description,
             start: {
                 dateTime: finalStartTime,
-                timeZone: 'Asia/Bangkok', // 🔥 FIX: use your real timezone
+                timeZone: 'Asia/Bangkok', // FIX: use your real timezone
             },
             end: {
                 dateTime: finalEndTime,

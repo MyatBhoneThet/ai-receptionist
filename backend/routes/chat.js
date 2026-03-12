@@ -93,7 +93,7 @@ function getRequiredFields(intent, data) {
                     !data.reservation_name && 'reservation name',
                 ].filter(Boolean),
             };
-            
+
         case 'cancel_booking':
         case 'cancel':
             return {
@@ -104,7 +104,7 @@ function getRequiredFields(intent, data) {
                     !data.reservation_name && 'reservation name',
                 ].filter(Boolean),
             };
-            
+
         default:
             return { valid: false, missing: [] };
     }
@@ -136,13 +136,13 @@ router.post('/', async (req, res) => {
         const validation = validateBookingResponse(llmResponse);
         const parsed = validation.data;
 
-        // 🧠 MERGE STATE (CRITICAL FIX)
+        // MERGE STATE (CRITICAL FIX)
         state = {
             ...state,
             ...parsed.data,
         };
 
-        // 🧠 HOTEL FIX (second date = checkout)
+        // HOTEL FIX (second date = checkout)
         if (state.date && !state.end_time && parsed.data.date && parsed.data.date !== state.date) {
             state.end_time = parsed.data.date;
         }
@@ -241,7 +241,7 @@ router.post('/', async (req, res) => {
                 );
                 state = { ...state, ...updated.rows[0] };
 
-                // 🔄 Premature Sync Removed: confirmation now happens in /confirm
+                // Premature Sync Removed: confirmation now happens in /confirm
             } else {
                 const result = await query(
                     `INSERT INTO bookings 
@@ -379,7 +379,7 @@ router.post('/', async (req, res) => {
 
         return res.json({
             ...parsed,
-            data: state, // ✅ always return merged state
+            data: state, // always return merged state
         });
 
     } catch (err) {
@@ -388,10 +388,7 @@ router.post('/', async (req, res) => {
     }
 });
 
-/**
- * POST /api/chat/confirm
- * Finalize the most recent pending booking for this session
- */
+// POST /api/chat/confirm(Finalize the most recent pending booking for this session)
 router.post('/confirm', async (req, res) => {
     const { session_id, action } = req.body;
 
@@ -435,7 +432,7 @@ router.post('/confirm', async (req, res) => {
 
         const confirmedBooking = result.rows[0];
 
-        // 🔄 Final Sync with Google Calendar on explicit confirmation
+        // Final Sync with Google Calendar on explicit confirmation
         try {
             if (confirmedBooking.status === 'confirmed') {
                 const eventId = await upsertEvent(confirmedBooking);
