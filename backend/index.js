@@ -10,8 +10,8 @@ import bookingsRouter from './routes/bookings.js';
 const app = express();
 const PORT = process.env.PORT || 4000;
 
-// ── Security headers (Helmet sets X-Frame-Options, X-Content-Type-Options,
-//    Strict-Transport-Security, Content-Security-Policy, Referrer-Policy, etc.)
+// Security headers (Helmet sets X-Frame-Options, X-Content-Type-Options,
+// Strict-Transport-Security, Content-Security-Policy, Referrer-Policy, etc.)
 app.use(helmet());
 
 // ── CORS — only allow requests from the configured frontend origin
@@ -25,10 +25,10 @@ app.use(
   })
 );
 
-// ── Global rate limiter (100 req / 15 min per IP) — applied before all routes
+// Global rate limiter (100 req / 15 min per IP) — applied before all routes
 app.use(globalLimiter);
 
-// ── Body size guard
+// Body size guard
 app.use(express.json({ limit: '1mb' }));
 
 // Routes
