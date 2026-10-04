@@ -1,17 +1,26 @@
-# Base image
-FROM node:18-alpine
-
-# Set working directory
+FROM node:20-alpine AS deps
 WORKDIR /app
-
-# Copy package files
 COPY package*.json ./
+RUN npm ci
 
-# Install dependencies
-RUN npm install
+FROM node:20-alpine AS builder
+WORKDIR /app
+ARG NEXT_PUBLIC_API_URL=http://127.0.0.1:4000
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+ENV NODE_ENV=production
+RUN npm run build
 
-# Expose port
+FROM node:20-alpine AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+ARG NEXT_PUBLIC_API_URL=http://127.0.0.1:4000
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+ENV PORT=3000
+COPY --from=builder /app/package*.json ./
+COPY --from=builder /app/.next ./.next
+COPY --from=builder /app/node_modules ./node_modules
+USER node
 EXPOSE 3000
-
-# Start app
-CMD ["npm", "run", "dev"]
+CMD ["npm", "start", "--", "-p", "3000", "-H", "0.0.0.0"]

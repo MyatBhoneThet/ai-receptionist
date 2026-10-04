@@ -5,11 +5,20 @@ import React, { useState, useRef, KeyboardEvent, ChangeEvent } from 'react';
 interface TextInputProps {
     onSend: (text: string) => void;
     disabled?: boolean;
+    value?: string;
+    onChangeValue?: (v: string) => void;
 }
 
-export default function TextInput({ onSend, disabled }: TextInputProps) {
-    const [value, setValue] = useState('');
+export default function TextInput({ onSend, disabled, value: controlled, onChangeValue }: TextInputProps) {
+    const [internal, setInternal] = useState('');
     const inputRef = useRef<HTMLInputElement>(null);
+
+    const value = controlled !== undefined ? controlled : internal;
+
+    const setValue = (v: string) => {
+        if (onChangeValue) onChangeValue(v);
+        else setInternal(v);
+    };
 
     const handleSend = () => {
         const trimmed = value.trim();
@@ -30,12 +39,12 @@ export default function TextInput({ onSend, disabled }: TextInputProps) {
     };
 
     return (
-        <div className="group relative flex items-center w-full transition-all duration-300">
+        <div className="group relative flex items-center w-full transition-all duration-500">
             <input
                 ref={inputRef}
-                className="w-full rounded-2xl bg-slate-800/50 px-6 py-4 pr-16 text-sm text-white placeholder-slate-500 outline-none ring-1 ring-slate-700/50 transition-all focus:bg-slate-800 focus:ring-primary-500/50 focus:shadow-[0_0_20px_rgba(139,92,246,0.1)] disabled:opacity-50"
+                className="w-full rounded-full bg-white px-8 py-5 pr-16 text-sm text-ink placeholder-ink/30 outline-none border border-parchment shadow-sm transition-all focus:border-gold focus:ring-4 focus:ring-gold/10 disabled:opacity-50 serif"
                 type="text"
-                placeholder="Message AI Receptionist..."
+                placeholder="Ask your concierge anything..."
                 value={value}
                 onChange={handleChange}
                 onKeyDown={handleKeyDown}
@@ -43,13 +52,13 @@ export default function TextInput({ onSend, disabled }: TextInputProps) {
                 aria-label="Chat input"
             />
             <button
-                className="absolute right-2 flex h-11 w-11 items-center justify-center rounded-xl bg-primary-600 text-white shadow-lg shadow-primary-500/20 transition-all hover:bg-primary-500 active:scale-95 disabled:grayscale disabled:opacity-50 disabled:active:scale-100"
+                className="absolute right-3 flex h-10 w-10 items-center justify-center rounded-full bg-ink text-white shadow-md transition-all hover:bg-gold hover:scale-110 active:scale-95 disabled:grayscale disabled:opacity-20 disabled:active:scale-100"
                 onClick={handleSend}
                 disabled={disabled || !value.trim()}
                 aria-label="Send message"
             >
-                <svg className="h-5 w-5 rotate-90" fill="currentColor" viewBox="0 0 24 24">
-                    <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
+                <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2.5">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
                 </svg>
             </button>
         </div>

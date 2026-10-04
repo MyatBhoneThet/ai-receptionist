@@ -5,6 +5,8 @@ import { useEffect, useRef, useState } from "react";
 export const useSpeechRecognition = (isActive: boolean) => {
     const [transcript, setTranscript] = useState("");
     const recognitionRef = useRef<any>(null);
+    const keepListeningRef = useRef(false);
+    const restartTimerRef = useRef<number | null>(null);
 
     useEffect(() => {
         if (typeof window === "undefined") return;
@@ -21,6 +23,26 @@ export const useSpeechRecognition = (isActive: boolean) => {
         recognition.interimResults = true;
         recognition.lang = "en-US";
 
+        const clearRestartTimer = () => {
+            if (restartTimerRef.current) {
+                window.clearTimeout(restartTimerRef.current);
+                restartTimerRef.current = null;
+            }
+        };
+
+        const restartRecognition = () => {
+            clearRestartTimer();
+            restartTimerRef.current = window.setTimeout(() => {
+                if (!keepListeningRef.current) return;
+                try {
+                    recognition.start();
+                } catch (err) {
+                    console.error("[SpeechRecognition] Restart error:", err);
+                    keepListeningRef.current = false;
+                }
+            }, 250);
+        };
+
         recognition.onresult = (event: any) => {
             let currentTranscript = "";
             for (let i = event.resultIndex; i < event.results.length; i++) {
@@ -29,21 +51,32 @@ export const useSpeechRecognition = (isActive: boolean) => {
             setTranscript(currentTranscript);
         };
 
+        recognition.onstart = () => {
+            keepListeningRef.current = true;
+        };
+
         recognition.onend = () => {
-            if (isActive) {
-                recognition.start(); // Keep listening if active
+            if (isActive && keepListeningRef.current) {
+                restartRecognition();
+                return;
             }
+            clearRestartTimer();
         };
 
         recognitionRef.current = recognition;
 
         if (isActive) {
+            keepListeningRef.current = true;
             recognition.start();
         } else {
+            keepListeningRef.current = false;
+            clearRestartTimer();
             recognition.stop();
         }
 
         return () => {
+            keepListeningRef.current = false;
+            clearRestartTimer();
             recognition.stop();
         };
     }, [isActive]);

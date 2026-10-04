@@ -10,25 +10,22 @@ interface ThinkingOrbProps {
 }
 
 const VOICE_TASKS = [
-    'Transcribing speech..',
-    'Parsing intent..',
-    'Searching vector space..',
-    'Analyzing context..',
-    'Optimizing response..',
-    'Collapsing attention heads..',
-    'Synthesizing output..',
-    'Refining token probabilities..',
+    'transcribing speech..',
+    'parsing intent..',
+    'searching archives..',
+    'analyzing context..',
+    'optimizing response..',
+    'refining tone..',
+    'synthesizing output..',
 ];
 
 const TEXT_TASKS = [
-    'Analyzing context..',
-    'Searching vector space..',
-    'Optimizing response..',
-    'Running semantic match..',
-    'Fetching memory embeddings..',
-    'Refining token probabilities..',
-    'Synthesizing output..',
-    'Cross-referencing knowledge graph..',
+    'analyzing context..',
+    'searching archives..',
+    'optimizing response..',
+    'running semantic match..',
+    'fetching memory..',
+    'synthesizing output..',
 ];
 
 export default function ThinkingOrb({ isThinking, isListening = false, trigger = 'text' }: ThinkingOrbProps) {
@@ -37,7 +34,6 @@ export default function ThinkingOrb({ isThinking, isListening = false, trigger =
     const lerpedVolRef = useRef(0);
     const freqRef = useRef<number[]>([]);
 
-    // Smooth volume updates
     useEffect(() => {
         volumeRef.current = volume;
         freqRef.current = frequency;
@@ -47,13 +43,10 @@ export default function ThinkingOrb({ isThinking, isListening = false, trigger =
     const rafRef = useRef<number | null>(null);
     const taskIdxRef = useRef(0);
     const taskIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-    const overlayRef = useRef<HTMLDivElement>(null);
 
-    // Task state
     const [currentTask, setCurrentTask] = useState("");
     const [taskOpacity, setTaskOpacity] = useState(0);
 
-    // Canvas animation
     useEffect(() => {
         const canvas = canvasRef.current;
         if (!canvas) return;
@@ -64,188 +57,86 @@ export default function ThinkingOrb({ isThinking, isListening = false, trigger =
         let H = canvas.height;
         let CX = W / 2;
         let CY = H / 2;
-        const R = Math.min(W, H) * 0.28;
-
-        // Fibonacci sphere dots
-        const NUM_DOTS = 320;
-        const golden = Math.PI * (3 - Math.sqrt(5));
-        const baseDots: { ox: number; oy: number; oz: number }[] = [];
-        for (let i = 0; i < NUM_DOTS; i++) {
-            const y = 1 - (i / (NUM_DOTS - 1)) * 2;
-            const r = Math.sqrt(1 - y * y);
-            const theta = golden * i;
-            baseDots.push({ ox: Math.cos(theta) * r, oy: y, oz: Math.sin(theta) * r });
-        }
-
-        // Pulses
-        const NUM_PULSES = 6;
-        const pulses = Array.from({ length: NUM_PULSES }, (_, i) => ({
-            lat: Math.random() * Math.PI,
-            lon: Math.random() * Math.PI * 2,
-            phase: (i / NUM_PULSES) * Math.PI * 2,
-            speed: 0.38 + Math.random() * 0.25,
-        }));
-
-        // Orbital rings
-        const rings = [
-            { tilt: 0.3, speed: 0.7, r: R * 1.18, dotCount: 18 },
-            { tilt: 1.1, speed: -0.5, r: R * 1.28, dotCount: 14 },
-            { tilt: 2.0, speed: 0.9, r: R * 1.08, dotCount: 22 },
-        ];
-
-        function rotateY(x: number, y: number, z: number, a: number) {
-            return { x: x * Math.cos(a) + z * Math.sin(a), y, z: -x * Math.sin(a) + z * Math.cos(a) };
-        }
-        function rotateX(x: number, y: number, z: number, a: number) {
-            return { x, y: y * Math.cos(a) - z * Math.sin(a), z: y * Math.sin(a) + z * Math.cos(a) };
-        }
+        const baseR = Math.min(W, H) * 0.25;
 
         let t = 0;
 
         const resize = () => {
-            W = canvas.width = canvas.offsetWidth;
-            H = canvas.height = canvas.offsetHeight;
+            W = canvas.width = canvas.offsetWidth * window.devicePixelRatio;
+            H = canvas.height = canvas.offsetHeight * window.devicePixelRatio;
             CX = W / 2;
             CY = H / 2;
+            ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+            // Adjusted coordinates for scaled context
+            CX /= window.devicePixelRatio;
+            CY /= window.devicePixelRatio;
         };
         resize();
         const ro = new ResizeObserver(resize);
         ro.observe(canvas);
 
         const draw = () => {
-            ctx.clearRect(0, 0, W, H);
+            const currentW = canvas.width / window.devicePixelRatio;
+            const currentH = canvas.height / window.devicePixelRatio;
+            ctx.clearRect(0, 0, currentW, currentH);
 
-            // Light radial background glow (much subtler on transparent)
-            const bg = ctx.createRadialGradient(CX, CY, 0, CX, CY, Math.min(W, H) * 0.5);
-            bg.addColorStop(0, 'rgba(10,30,80,0.2)');
-            bg.addColorStop(1, 'rgba(0,0,0,0)');
-            ctx.fillStyle = bg;
-            ctx.fillRect(0, 0, W, H);
-
-            // Smoothing
             lerpedVolRef.current += (volumeRef.current - lerpedVolRef.current) * 0.15;
             const v = lerpedVolRef.current;
             const freqs = freqRef.current;
 
-            const ry = t * (0.28 + v * 0.4);
-            const rx = t * (0.13 + v * 0.2);
-            const scaledR = Math.min(W, H) * (0.28 + v * 0.08);
-
-            // Orb dots
-            const dotData = baseDots.map((d, idx) => {
-                // Frequency-based displacement (morphing)
-                // Map dot index to frequency bins (0..9)
-                const freqIdx = Math.floor((idx / NUM_DOTS) * 10);
-                const fVal = (freqs[freqIdx] || 0) / 255;
-                const dist = scaledR * (1 + fVal * 0.25 * (isListening ? 1 : 0.1));
-
-                let { x, y, z } = rotateY(d.ox * dist, d.oy * dist, d.oz * dist, ry);
-                ({ x, y, z } = rotateX(x, y, z, rx));
-
-                const depth = (z + scaledR) / (2 * scaledR);
-                const sx = CX + x;
-                const sy = CY + y;
-
-                let pulse = 0;
-                for (const p of pulses) {
-                    const dotLat = Math.acos(Math.max(-1, Math.min(1, d.oy)));
-                    const dotLon = Math.atan2(d.oz, d.ox);
-                    const pLat = p.lat + t * (0.6 + v * 1.2);
-                    const pLon = p.lon + t * (p.speed + v * 0.8);
-                    const angle = Math.acos(Math.max(-1, Math.min(1,
-                        Math.cos(dotLat) * Math.cos(pLat % Math.PI) +
-                        Math.sin(dotLat) * Math.sin(pLat % Math.PI) * Math.cos(dotLon - pLon)
-                    )));
-                    const wave = Math.cos(angle * 4 - t * 3 + p.phase);
-                    pulse += Math.max(0, wave) * (0.5 + v * 2.0);
-                }
-                pulse = Math.min(1.2, pulse);
-                return { sx, sy, depth, pulse, z, fVal };
-            });
-            dotData.sort((a, b) => a.z - b.z);
-
-            for (const d of dotData) {
-                const voiceBoost = isListening ? v * 0.4 : 0;
-                const alpha = (0.12 + d.depth * 0.58 + d.pulse * 0.3 + voiceBoost);
-                const radius = 1.0 + d.depth * 1.8 + d.pulse * (1.5 + v * 3.5);
-
-                // Color morphing
-                const r = Math.round(80 + d.depth * 80 + d.pulse * (155 + v * 100));
-                const g = Math.round(180 + d.depth * 40 + d.pulse * 75 + v * 30);
-                const b = 255;
-
-                if (d.pulse > 0.15 || (isListening && v > 0.1)) {
-                    const glowRadius = radius * (4 + v * 12 + d.fVal * 10);
-                    const glow = ctx.createRadialGradient(d.sx, d.sy, 0, d.sx, d.sy, glowRadius);
-                    const glowAlpha = Math.min(0.8, (alpha * 0.5) + v * 0.5);
-                    glow.addColorStop(0, `rgba(${r},${g},${b},${glowAlpha.toFixed(2)})`);
-                    glow.addColorStop(1, 'rgba(0,0,0,0)');
-                    ctx.beginPath();
-                    ctx.arc(d.sx, d.sy, glowRadius, 0, Math.PI * 2);
-                    ctx.fillStyle = glow;
-                    ctx.fill();
-                }
-
-                ctx.beginPath();
-                ctx.arc(d.sx, d.sy, radius, 0, Math.PI * 2);
-                ctx.fillStyle = `rgba(${r},${g},${b},${Math.min(1, alpha).toFixed(2)})`;
-                ctx.fill();
-            }
-
-            // Orbital rings
-            for (const ring of rings) {
-                const ringSpeed = ring.speed * (1 + v * 2);
-                const ringAngle = t * ringSpeed;
-                const scaledRingR = ring.r * (scaledR / (Math.min(W, H) * 0.28));
-                for (let i = 0; i < ring.dotCount; i++) {
-                    const phi = (i / ring.dotCount) * Math.PI * 2 + ringAngle;
-                    let rx2 = Math.cos(phi) * scaledRingR;
-                    let ry2 = 0;
-                    let rz = Math.sin(phi) * scaledRingR;
-                    const cosT = Math.cos(ring.tilt), sinT = Math.sin(ring.tilt);
-                    const newY = ry2 * cosT - rz * sinT;
-                    const newZ = ry2 * sinT + rz * cosT;
-                    ry2 = newY; rz = newZ;
-                    let p = rotateY(rx2, ry2, rz, ry);
-                    p = rotateX(p.x, p.y, p.z, rx);
-                    const depth = (p.z + scaledRingR) / (2 * scaledRingR);
-                    const alpha = 0.12 + depth * 0.5;
-                    const ripple = Math.sin(phi * 3 - t * (2.5 + v * 5)) * 0.5 + 0.5;
-                    const pr = Math.round(100 + ripple * 155);
-                    const pg = Math.round(200 + ripple * 55);
-                    const pb = 255;
-                    const pa = alpha + ripple * (0.25 + v * 0.5);
-                    const rAdj = (1.4 + depth * 1.4) * (1 + v * 1.5);
-                    ctx.beginPath();
-                    ctx.arc(CX + p.x, CY + p.y, rAdj + ripple * (1.2 + v * 3), 0, Math.PI * 2);
-                    ctx.fillStyle = `rgba(${pr},${pg},${pb},${Math.min(1, pa).toFixed(2)})`;
-                    ctx.fill();
-                }
-            }
-
-            // Core inner glow (liquid center)
-            const coreBreath = 0.82 + Math.sin(t * (1.4 + v * 3)) * 0.18 + v * 0.25;
-            const coreSize = scaledR * (0.55 + v * 0.6);
-            const core = ctx.createRadialGradient(CX, CY, 0, CX, CY, coreSize * coreBreath);
-            core.addColorStop(0, `rgba(200,245,255,${(0.12 * coreBreath + v * 0.15).toFixed(3)})`);
-            core.addColorStop(0.5, `rgba(80,160,255,${(0.06 * coreBreath + v * 0.08).toFixed(3)})`);
-            core.addColorStop(1, 'rgba(0,0,0,0)');
+            // 1. Central Glow Circle
+            const coreSize = baseR * (0.9 + v * 0.3);
+            const coreGradient = ctx.createRadialGradient(CX, CY, 0, CX, CY, coreSize);
+            coreGradient.addColorStop(0, `rgba(201, 169, 110, ${0.15 + v * 0.25})`);
+            coreGradient.addColorStop(0.6, `rgba(201, 169, 110, ${0.05 + v * 0.1})`);
+            coreGradient.addColorStop(1, 'rgba(0,0,0,0)');
+            
             ctx.beginPath();
             ctx.arc(CX, CY, coreSize, 0, Math.PI * 2);
-            ctx.fillStyle = core;
+            ctx.fillStyle = coreGradient;
             ctx.fill();
 
-            // Outer halo
-            const halo = ctx.createRadialGradient(CX, CY, scaledR * 0.88, CX, CY, scaledR * (1.35 + v * 0.5));
-            halo.addColorStop(0, `rgba(50,150,255,${(0.07 + v * 0.05).toFixed(2)})`);
-            halo.addColorStop(0.4, `rgba(30,100,220,${(0.03 + v * 0.02).toFixed(2)})`);
-            halo.addColorStop(1, 'rgba(0,0,0,0)');
+            // 2. Vibrating Strings (Sine Waves)
+            const numStrings = 6;
+            for (let i = 0; i < numStrings; i++) {
+                ctx.beginPath();
+                const alpha = (0.4 - i * 0.05 + v * 0.5);
+                ctx.strokeStyle = `rgba(201, 169, 110, ${Math.max(0.1, alpha).toFixed(2)})`;
+                ctx.lineWidth = 1.2 + v * 3;
+                
+                const stringR = baseR * (0.95 + i * 0.08);
+                const segments = 150;
+                
+                for (let s = 0; s <= segments; s++) {
+                    const angle = (s / segments) * Math.PI * 2;
+                    
+                    // Wave modulation based on time, string index, and audio
+                    const freqIdx = Math.floor((s / segments) * 16) % 32;
+                    const fVal = (freqs[freqIdx] || 0) / 255;
+                    
+                    const baseNoise = Math.sin(angle * (3 + i % 2) + t * (1.5 + i * 0.5));
+                    const jitter = Math.cos(angle * 8 - t * 4) * 0.5;
+                    const audioBoost = isListening ? fVal * 45 * (v + 0.2) : v * 15;
+                    
+                    const dist = stringR + (baseNoise + jitter) * (4 + v * 20) + audioBoost;
+                    const x = CX + Math.cos(angle) * dist;
+                    const y = CY + Math.sin(angle) * dist;
+                    
+                    if (s === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.closePath();
+                ctx.stroke();
+            }
+
+            // 3. Inner stable ring
             ctx.beginPath();
-            ctx.arc(CX, CY, scaledR * (1.35 + v * 0.5), 0, Math.PI * 2);
-            ctx.fillStyle = halo;
-            ctx.fill();
+            ctx.arc(CX, CY, baseR * 0.9, 0, Math.PI * 2);
+            ctx.strokeStyle = `rgba(201, 169, 110, ${0.1 + v * 0.2})`;
+            ctx.lineWidth = 0.5;
+            ctx.stroke();
 
-            t += 0.012;
+            t += 0.015 + v * 0.04;
             rafRef.current = requestAnimationFrame(draw);
         };
 
@@ -254,9 +145,8 @@ export default function ThinkingOrb({ isThinking, isListening = false, trigger =
             if (rafRef.current) cancelAnimationFrame(rafRef.current);
             ro.disconnect();
         };
-    }, []);
+    }, [isListening]);
 
-    // Task text cycling
     useEffect(() => {
         if (isListening || !isThinking) {
             setTaskOpacity(0);
@@ -284,58 +174,51 @@ export default function ThinkingOrb({ isThinking, isListening = false, trigger =
 
     return (
         <div
-            ref={overlayRef}
             aria-hidden={!isThinking}
             style={{
                 position: 'fixed',
                 inset: 0,
-                zIndex: 50,
+                zIndex: 150,
                 display: 'flex',
                 flexDirection: 'column',
                 alignItems: 'center',
                 justifyContent: 'center',
-                pointerEvents: 'none', // Allow clicking through to the chat
+                pointerEvents: 'none',
                 opacity: isThinking ? 1 : 0,
-                transition: 'opacity 0.45s ease, transform 0.45s ease',
-                transform: isThinking ? 'scale(1)' : 'scale(0.9)',
+                transition: 'opacity 0.6s ease, transform 0.6s cubic-bezier(0.16, 1, 0.3, 1)',
+                transform: isThinking ? 'scale(1)' : 'scale(0.95)',
+                background: isThinking ? 'rgba(249, 247, 242, 0.4)' : 'transparent',
+                backdropFilter: isThinking ? 'blur(8px)' : 'none',
             }}
         >
-            <canvas
-                ref={canvasRef}
-                style={{
-                    width: '100%',
-                    maxWidth: '520px',
-                    aspectRatio: '1 / 1',
-                }}
-            />
+            <canvas ref={canvasRef} style={{ width: '100%', maxWidth: '480px', aspectRatio: '1/1' }} />
             <div
                 style={{
-                    marginTop: '-48px',
-                    color: '#7efff5',
-                    fontFamily: "'Inter', system-ui, sans-serif",
-                    fontSize: '14px',
-                    fontWeight: 500,
-                    letterSpacing: '0.05em',
-                    textShadow: '0 0 15px rgba(126,255,245,0.4)',
+                    marginTop: '-64px',
+                    color: '#c9a96e',
+                    fontFamily: "'Instrument Serif', serif",
+                    fontSize: '24px',
                     transition: 'opacity 0.4s ease',
                     opacity: isThinking || isListening ? 1 : 0,
                     userSelect: 'none',
                     display: 'flex',
+                    flexDirection: 'column',
                     alignItems: 'center',
-                    gap: '12px',
+                    gap: '8px',
                 }}
             >
                 {isListening ? (
-                    <>
-                        <span className="flex h-2 w-2 relative">
-                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75"></span>
-                            <span className="relative inline-flex rounded-full h-2 w-2 bg-rose-500"></span>
-                        </span>
-                        <span className="tracking-widest uppercase text-xs opacity-80">Listening to your voice...</span>
-                    </>
+                    <div className="flex flex-col items-center">
+                        <div className="flex space-x-1 mb-2">
+                             {[0, 1, 2].map(i => (
+                                <span key={i} className="h-1 w-1 rounded-full bg-gold animate-bounce" style={{ animationDelay: `${i * 0.15}s` }} />
+                             ))}
+                        </div>
+                        <span className="tracking-tight lowercase text-ink/40 font-bold text-xs uppercase tracking-widest not-italic">Listening...</span>
+                    </div>
                 ) : (
                     <span 
-                        className="italic opacity-90 animate-pulse"
+                        className="lowercase first-letter:uppercase"
                         style={{ opacity: taskOpacity, transition: 'opacity 0.4s ease' }}
                     >
                         {trigger === 'voice' ? 'Transcribing...' : (currentTask || 'Thinking...')}

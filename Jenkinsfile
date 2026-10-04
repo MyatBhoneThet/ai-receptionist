@@ -42,8 +42,10 @@ pipeline {
                 sh 'docker stop ai-frontend || true'
                 sh 'docker rm ai-frontend || true'
 
-                sh 'docker run -d -p 5000:5000 --name ai-backend ai-receptionist-backend'
-                sh 'docker run -d -p 3000:3000 --name ai-frontend ai-receptionist-frontend'
+                sh 'test -f .env'
+                sh 'docker network create ai-receptionist-net || true'
+                sh 'docker run -d --restart unless-stopped --env-file .env --network ai-receptionist-net -p 4000:4000 --name ai-backend ai-receptionist-backend'
+                sh 'docker run -d --restart unless-stopped --env-file .env --network ai-receptionist-net -p 3000:3000 --name ai-frontend ai-receptionist-frontend'
             }
         }
     }

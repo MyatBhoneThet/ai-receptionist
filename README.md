@@ -55,17 +55,36 @@ cd AI-Receptionist
 ```
 
 ### 2. Configure Environment Variables
-Create `.env` files in both `backend` and `frontend` directories.
+Copy [`.env.example`](/Users/myatbhonethet/Downloads/AI-Receptionist/.env.example) to `.env` in the project root and fill in real values.
 
-**Backend (`backend/.env`):**
+**Required values:**
 ```env
 DATABASE_URL=postgres_url
 GROQ_API_KEY=groq_key
 PORT=4000
 FRONTEND_URL=http://localhost:3000
+SESSION_SIGNING_SECRET=long_random_secret
+ADMIN_TOKEN=long_random_admin_token
+ENABLE_LEGACY_ADMIN_TOKEN_FALLBACK=true
+DB_SSL_REJECT_UNAUTHORIZED=true
+TRUST_PROXY=false
 GOOGLE_CALENDAR_ID=email
 GOOGLE_CLIENT_EMAIL=service_account_email
 GOOGLE_PRIVATE_KEY="private_key"
+NEXT_PUBLIC_API_URL=http://localhost:4000
+NEXT_PUBLIC_ENABLE_LOCALSTORAGE_AUTH_FALLBACK=true
+SMTP_HOST=
+SMTP_PORT=587
+SMTP_SECURE=false
+SMTP_USER=
+SMTP_PASS=
+SMTP_FROM=
+TWILIO_ACCOUNT_SID=
+TWILIO_AUTH_TOKEN=
+TWILIO_FROM=
+STAFF_ALERT_EMAIL=
+STAFF_WEBHOOK_URL=
+STAFF_WEBHOOK_PROVIDER=slack
 ```
 
 ### 3. Install Dependencies
@@ -83,9 +102,18 @@ npm install
 ```bash
 cd backend
 npm run db:init
+npm run db:seed:inventory
 ```
 
+That schema includes the application settings and audit tables used by the admin settings, booking, and inventory screens.
+
 ### 5. Run the Application
+From the project root, start both the backend and frontend:
+```bash
+npm run dev
+```
+
+Or start each service separately in its own terminal:
 ```bash
 # Start backend (from /backend)
 npm run dev
@@ -94,11 +122,29 @@ npm run dev
 npm run dev
 ```
 
+Default ports are:
+- Backend: `4000`
+- Frontend: `3000`
+
+If one is already in use, change `PORT` in `backend/.env` or `NEXT_PUBLIC_API_URL`/the frontend dev port to match your local setup.
+
 ## 🐳 Docker Support
 Run the entire stack using Docker Compose:
 ```bash
 docker-compose up --build
 ```
+
+4. **Push**: `docker compose build && docker compose push`
+
+### Run with Docker Hub
+If you want to pull and run the images on a new server:
+```bash
+docker compose pull && docker compose up -d
+```
+*(Note: Ensure your `.env` files are present in the same directory.)*
+
+For a detailed guide, see [docker_guide.md](file:///Users/myatbhonethet/.gemini/antigravity/brain/5438f82b-f374-47c5-9c14-37d684df9c06/docker_guide.md).
+
 
 ## Continuous Integration (Jenkins)
 
@@ -165,6 +211,12 @@ This bypasses the broken plugin phase and starts the job immediately.
 - **Rate Limiting**: Configured in `backend/middleware/rateLimiter.js` to protect against brute-force and API abuse.
 - **Helmet**: Protects the app from well-known web vulnerabilities by setting HTTP headers appropriately.
 - **Input Validation**: Strict schema validation for all API requests using Zod.
+- **Session Proofs**: Session-scoped booking reads and confirmations require a backend-signed session token.
+- **Admin Protection**: Analytics and privileged booking mutation routes require `ADMIN_TOKEN`.
+- **Notifications**: Optional booking confirmation/reminder/cancellation/VIP alerts can be sent by SMTP, Twilio, and staff webhooks. Set `STAFF_WEBHOOK_PROVIDER=slack` or `teams` to match the destination format.
+- **Legacy Fallbacks**: The app still supports the old admin token header and localStorage session token flow for compatibility. Set `ENABLE_LEGACY_ADMIN_TOKEN_FALLBACK=false` and `NEXT_PUBLIC_ENABLE_LOCALSTORAGE_AUTH_FALLBACK=false` when you want to remove them.
+- **Audit Trail**: Notification settings, bookings, and inventory changes are written to `audit_logs` and surfaced in the admin settings page.
+- **Secrets Hygiene**: Do not commit real `.env` or service-account credentials. Rotate any secret that was previously committed.
 
 ---
 *Created by [MyatBhoneThet](https://github.com/MyatBhoneThet)*

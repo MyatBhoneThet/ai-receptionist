@@ -18,9 +18,9 @@ function speakText(text: string): void {
     window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(text);
 
-    utterance.rate = 1;
-    utterance.pitch = 1.3;
-    utterance.volume = 1.0;
+    utterance.rate = 0.96;
+    utterance.pitch = 1.45;
+    utterance.volume = 0.98;
 
     const getBestVoice = () => {
         const voices = window.speechSynthesis.getVoices();
@@ -44,11 +44,14 @@ interface Message {
 
 export default function Page() {
     const [sessionId, setSessionId] = useState<string>('');
+    const [sessionToken, setSessionToken] = useState<string>('');
 
     useEffect(() => {
         const stored = localStorage.getItem('ai_receptionist_session');
+        const storedToken = localStorage.getItem('ai_receptionist_session_token');
         if (stored) {
             setSessionId(stored);
+            if (storedToken) setSessionToken(storedToken);
         } else {
             const newId = uuidv4();
             localStorage.setItem('ai_receptionist_session', newId);
@@ -67,6 +70,8 @@ export default function Page() {
     const [isListening, setIsListening] = useState<boolean>(false);
     const isSpeakingRef = useRef<boolean>(false);
     const lastInputWasVoiceRef = useRef<boolean>(false);
+    const [inputValue, setInputValue] = useState<string>('');
+    const [speechLang, setSpeechLang] = useState<string>('en-US');
 
     const handleSend = useCallback(async (text: string) => {
         if (!text.trim() || loading) return;
@@ -77,9 +82,15 @@ export default function Page() {
 
         try {
             const response: ChatResponse = await sendMessage(sessionId, text);
+            if (response.session_token) {
+                setSessionToken(response.session_token);
+                localStorage.setItem('ai_receptionist_session_token', response.session_token);
+            }
             setMessages((prev) => [...prev, { role: 'assistant', content: response.message }]);
-            setCurrentData(response.data);
-            setCurrentIntent(response.intent);
+            // attach availability to data for UI
+            const mergedData = response.data ? { ...response.data, availability: response.availability } : response.data;
+            setCurrentData(mergedData);
+            setCurrentIntent(response.show_reservation_slip ? 'reservation_slip' : response.intent);
             setMissingFields(response.missing_fields || []);
             setConfidence(response.confidence);
 
@@ -110,8 +121,8 @@ export default function Page() {
     const handleVoiceTranscript = useCallback((text: string) => {
         setInterimTranscript('');
         lastInputWasVoiceRef.current = true;
-        handleSend(text);
-    }, [handleSend]);
+        setInputValue(text);
+    }, []);
 
     const handleTextSend = useCallback((text: string) => {
         lastInputWasVoiceRef.current = false;
@@ -123,7 +134,7 @@ export default function Page() {
         setShowConfirm(false);
         const confirmMsg = isCancel 
             ? '🗑️ Your booking has been cancelled. Is there anything else I can help with?'
-            : '✅ Your booking is confirmed! Is there anything else?';
+            : 'Your booking is confirmed! Have a nice day!';
         setMessages((prev) => [...prev, { role: 'assistant', content: confirmMsg }]);
         speakText(confirmMsg);
         setCurrentData(null);
@@ -145,64 +156,88 @@ export default function Page() {
                 isListening={isListening}
                 trigger={lastInputWasVoiceRef.current ? 'voice' : 'text'}
             />
-            <main className="flex h-screen w-full overflow-hidden bg-slate-950">
-                {/* Sidebar — booking summary */}
-                <aside className="hidden w-80 flex-col border-r border-slate-800/50 bg-slate-900/50 p-6 lg:flex">
-                    <div className="mb-8 flex items-center space-x-3">
-                        <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary-600 shadow-lg shadow-primary-500/20">
-                            <span className="text-xl">🏨</span>
+            <main className="flex h-screen w-full overflow-hidden bg-parchment">
+                {/* 1. Left Sidebar — Brand & Identity */}
+                <aside className="hidden w-72 flex-col border-r border-parchment material-parchment p-8 lg:flex">
+                    <div className="mb-12 flex flex-col items-center text-center">
+                        <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-white shadow-sm border border-parchment">
+                            <span className="text-3xl">🏨</span>
                         </div>
-                        <div>
-                            <h1 className="text-lg font-bold tracking-tight text-white">AI Receptionist</h1>
-                            <p className="text-xs font-medium text-slate-400">Hotel & Restaurant</p>
-                        </div>
+                        <h1 className="text-2xl font-bold tracking-tight text-ink serif lowercase">
+                            Lumière <span className="text-xs absolute -mt-1 ml-1 opacity-50 not-italic">AI</span>
+                        </h1>
+                        <p className="mt-1 text-[10px] font-bold tracking-widest text-gold uppercase">
+                            Grand Concierge
+                        </p>
                     </div>
 
-                    <div className="flex-1 overflow-y-auto">
-                        <BookingSummary
-                            data={currentData}
-                            missing_fields={missingFields}
-                            intent={currentIntent}
-                            confidence={confidence}
-                        />
-                    </div>
+                    <nav className="flex-1 space-y-6">
+                        <section>
+                            <h3 className="text-[10px] font-bold uppercase tracking-widest text-ink/40 mb-3 ml-2">Services</h3>
+                            <div className="space-y-1">
+                                <div 
+                                    className="flex items-center space-x-3 rounded-lg px-3 py-2 text-sm font-medium text-ink transition hover:bg-white leading-none group cursor-pointer"
+                                    onClick={() => handleTextSend("I'd like to book a hotel room")}
+                                >
+                                    <span className="opacity-50 group-hover:opacity-100 serif">01.</span>
+                                    <span>Hotel Rooms</span>
+                                </div>
+                                <div 
+                                    className="flex items-center space-x-3 rounded-lg px-3 py-2 text-sm font-medium text-ink transition hover:bg-white leading-none group cursor-pointer"
+                                    onClick={() => handleTextSend("I'd like to book a table at the restaurant")}
+                                >
+                                    <span className="opacity-50 group-hover:opacity-100 serif">02.</span>
+                                    <span>Restaurant</span>
+                                </div>
+                                <div 
+                                    className="flex items-center space-x-3 rounded-lg px-3 py-2 text-sm font-medium text-ink transition hover:bg-white leading-none group cursor-pointer"
+                                    onClick={() => handleTextSend("I'd like to book a meeting room")}
+                                >
+                                    <span className="opacity-50 group-hover:opacity-100 serif">03.</span>
+                                    <span>Meetings</span>
+                                </div>
+                            </div>
+                        </section>
+                    </nav>
 
-                    {currentData && (
-                        <button
-                            className="group mt-6 flex items-center justify-center space-x-2 rounded-xl bg-slate-800 p-3 text-sm font-semibold text-slate-300 transition-all hover:bg-slate-700 hover:text-white"
-                            onClick={() => {
-                                localStorage.removeItem('ai_receptionist_session');
-                                window.location.reload();
-                            }}
-                        >
-                            <span>New Booking</span>
-                        </button>
-                    )}
+                    <div className="pt-8 mt-auto border-t border-parchment">
+                        <p className="text-[10px] text-ink/40 leading-relaxed">
+                            "Excellence is not an act, but a habit."
+                        </p>
+                    </div>
                 </aside>
 
-                {/* Main chat panel */}
-                <section className="relative flex flex-1 flex-col bg-glow overflow-hidden">
-                    <header className="flex h-20 items-center justify-between border-b border-slate-800/50 bg-slate-900/40 px-8 backdrop-blur-md">
-                        <div className="flex items-center space-x-3">
-                            <div className={`h-2.5 w-2.5 rounded-full ${loading ? 'animate-pulse bg-amber-500 shadow-[0_0_8px_rgba(245,158,11,0.5)]' : 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]'}`} />
-                            <span className="text-sm font-semibold tracking-wide text-slate-200 uppercase">
-                                {loading ? 'Thinking...' : 'Online Assistant'}
-                            </span>
+                {/* 2. Center Stage — Main Chat Window */}
+                <section className="relative flex flex-1 flex-col overflow-hidden">
+                    <header className="flex h-20 items-center justify-between border-b border-parchment bg-white/40 px-8 backdrop-blur-md">
+                        <div className="flex items-center space-x-4">
+                            <div className="relative">
+                                <div className="h-10 w-10 rounded-full bg-paper flex items-center justify-center text-sm border border-parchment overflow-hidden">
+                                     <img src="https://api.dicebear.com/7.x/notionists/svg?seed=Anya&backgroundColor=f9f7f2" alt="Concierge" />
+                                </div>
+                                <div className={`absolute bottom-0 right-0 h-2.5 w-2.5 rounded-full border-2 border-white ${loading ? 'bg-amber-400' : 'bg-emerald-500'}`} />
+                            </div>
+                            <div>
+                                <h2 className="text-sm font-bold text-ink leading-tight">Lady Anya</h2>
+                                <p className="text-[10px] font-medium text-gold uppercase tracking-tighter">Receptionist</p>
+                            </div>
                         </div>
 
-                        <div className="lg:hidden text-lg font-bold text-white">🏨 AI Receptionist</div>
+                        <div className="flex items-center space-x-2 lg:hidden">
+                             <span className="text-lg serif font-bold">Lumière</span>
+                        </div>
                     </header>
 
                     <div className="flex-1 overflow-hidden relative">
                         <ChatWindow messages={messages} />
                     </div>
 
-                    <footer className="p-6 bg-slate-900/40 backdrop-blur-xl border-t border-slate-800/50">
-                        <div className="mx-auto max-w-4xl space-y-4">
+                    <footer className="p-8 bg-gradient-to-t from-white/80 to-transparent">
+                        <div className="mx-auto max-w-3xl">
                             {interimTranscript && (
-                                <div className="flex items-center space-x-3 px-4 py-2 rounded-full glass-dark animate-fade-in">
-                                    <span className="h-2 w-2 rounded-full bg-primary-500 animate-pulse" />
-                                    <span className="text-sm italic text-slate-300 truncate font-light">
+                                <div className="flex items-center space-x-3 px-4 py-2 mb-4 rounded-full bg-white/60 border border-parchment animate-fade-in shadow-sm">
+                                    <span className="h-1.5 w-1.5 rounded-full bg-gold animate-pulse" />
+                                    <span className="text-xs text-ink/60 font-light truncate">
                                         "{interimTranscript}..."
                                     </span>
                                 </div>
@@ -213,21 +248,78 @@ export default function Page() {
                                     onInterimTranscript={setInterimTranscript}
                                     onListeningChange={setIsListening}
                                     disabled={loading}
+                                    lang={speechLang}
                                 />
-                                <div className="flex-1">
-                                    <TextInput onSend={handleTextSend} disabled={loading} />
+                                <div className="flex-1 space-y-3">
+                                    <div className="flex items-center gap-2">
+                                        <label className="text-[10px] font-bold uppercase tracking-widest text-ink/50">Voice lang</label>
+                                        <select
+                                            className="rounded-full border border-parchment bg-white px-3 py-1 text-xs text-ink/70"
+                                            value={speechLang}
+                                            onChange={(e) => setSpeechLang(e.target.value)}
+                                        >
+                                            <option value="en-US">English (US)</option>
+                                            <option value="es-ES">Español</option>
+                                            <option value="fr-FR">Français</option>
+                                            <option value="th-TH">ไทย</option>
+                                        </select>
+                                    </div>
+                                    <TextInput onSend={handleTextSend} disabled={loading} value={inputValue} onChangeValue={setInputValue} />
                                 </div>
                             </div>
+                            {interimTranscript && (
+                                <div className="mt-3 flex items-center space-x-3 text-xs text-ink/60">
+                                    <button
+                                        className="px-3 py-1 rounded-full bg-ink text-white text-[11px] font-bold uppercase tracking-widest"
+                                        onClick={() => setInputValue(interimTranscript.trim())}
+                                    >
+                                        Edit transcript
+                                    </button>
+                                    <span className="truncate">"{interimTranscript}..."</span>
+                                </div>
+                            )}
                         </div>
                     </footer>
                 </section>
 
+                {/* 3. Right Sidebar — Summary & Stats */}
+                <aside className="hidden w-96 flex-col border-l border-parchment material-parchment p-8 xl:flex">
+                     <div className="flex-1 overflow-y-auto custom-scrollbar pr-1">
+                        <BookingSummary
+                            data={currentData}
+                            missing_fields={missingFields}
+                            intent={currentIntent}
+                            confidence={confidence}
+                            sessionId={sessionId}
+                            sessionToken={sessionToken}
+                            availability={(currentData as any)?.availability}
+                            onSuggestDate={(date) => handleTextSend(`Please move my booking to ${date}`)}
+                        />
+
+                    </div>
+
+                    <div className="mt-8">
+                         <button
+                            className="w-full flex items-center justify-center space-x-2 rounded-full border border-ink/10 p-4 text-xs font-bold text-ink/60 transition-all hover:bg-ink hover:text-white"
+                            onClick={() => {
+                                localStorage.removeItem('ai_receptionist_session');
+                                localStorage.removeItem('ai_receptionist_session_token');
+                                window.location.reload();
+                            }}
+                        >
+                            <span>Clear Conversation</span>
+                        </button>
+                    </div>
+                </aside>
+
                 {/* Confirm modal */}
                 {showConfirm && (
-                    <ConfirmModal
-                        sessionId={sessionId}
-                        summary={currentData}
-                        onConfirm={handleConfirmed}
+                <ConfirmModal
+                    sessionId={sessionId}
+                    sessionToken={sessionToken}
+                    summary={currentData}
+                    intent={currentIntent}
+                    onConfirm={handleConfirmed}
                         onCancel={handleCancelConfirm}
                     />
                 )}

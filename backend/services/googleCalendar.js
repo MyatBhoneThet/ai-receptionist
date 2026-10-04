@@ -3,6 +3,7 @@ import 'dotenv/config';
 
 const SCOPES = ['https://www.googleapis.com/auth/calendar'];
 const calendarId = process.env.GOOGLE_CALENDAR_ID;
+const CALENDAR_TIMEZONE = process.env.CALENDAR_TIMEZONE || 'Asia/Bangkok';
 
 // Fix private key formatting safely
 const processedKey = process.env.GOOGLE_PRIVATE_KEY
@@ -26,16 +27,39 @@ const calendar = google.calendar({ version: 'v3', auth });
 function formatDateLocal(date) {
     if (!date) return null;
 
-    if (typeof date === 'string') return date;
+    if (typeof date === 'string') {
+        if (/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+            return date;
+        }
+
+        const parsed = new Date(date);
+        if (!Number.isNaN(parsed.getTime())) {
+            return new Intl.DateTimeFormat('en-CA', {
+                timeZone: CALENDAR_TIMEZONE,
+                year: 'numeric',
+                month: '2-digit',
+                day: '2-digit',
+            }).format(parsed);
+        }
+
+        const dmY = date.match(/^(\d{2})-(\d{2})-(\d{4})$/);
+        if (dmY) {
+            const [, dd, mm, yyyy] = dmY;
+            return `${yyyy}-${mm}-${dd}`;
+        }
+
+        return null;
+    }
 
     const d = new Date(date);
-    if (isNaN(d)) return null;
+    if (Number.isNaN(d.getTime())) return null;
 
-    const year = d.getFullYear();
-    const month = String(d.getMonth() + 1).padStart(2, '0');
-    const day = String(d.getDate()).padStart(2, '0');
-
-    return `${year}-${month}-${day}`;
+    return new Intl.DateTimeFormat('en-CA', {
+        timeZone: CALENDAR_TIMEZONE,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+    }).format(d);
 }
 
 // Build ISO datetime safely WITHOUT shifting timezone incorrectly
@@ -59,7 +83,6 @@ export async function upsertEvent(booking) {
             start_time,
             end_time,
             people,
-            location,
             notes,
             google_event_id,
         } = booking;
@@ -103,15 +126,14 @@ export async function upsertEvent(booking) {
 
         const event = {
             summary,
-            location: location || '',
             description,
             start: {
                 dateTime: finalStartTime,
-                timeZone: 'Asia/Bangkok', // FIX: use your real timezone
+                timeZone: CALENDAR_TIMEZONE,
             },
             end: {
                 dateTime: finalEndTime,
-                timeZone: 'Asia/Bangkok',
+                timeZone: CALENDAR_TIMEZONE,
             },
         };
 
@@ -149,7 +171,7 @@ export async function upsertEvent(booking) {
 
 // Delete event
 export async function cancelEvent(googleEventId) {
-    if (!calendarId || !googleEventId) return;
+    if (!calendarId || !googleEventId) return false;
 
     try {
         await calendar.events.delete({
@@ -158,8 +180,37 @@ export async function cancelEvent(googleEventId) {
         });
 
         console.log('[Google Calendar] Deleted:', googleEventId);
+        return true;
     } catch (error) {
+        if (error.code === 404 || error.code === 410) {
+            console.warn('[Google Calendar] Event already missing:', googleEventId);
+            return true;
+        }
         console.error('[Google Calendar] Delete error:', error.message);
+        return false;
+    }
+}
+
+export async function getEventStatus(googleEventId) {
+    if (!calendarId || !googleEventId) return { available: false, reason: 'disabled' };
+
+    try {
+        const res = await calendar.events.get({
+            calendarId,
+            eventId: googleEventId,
+        });
+
+        return {
+            available: res.data.status !== 'cancelled',
+            status: res.data.status || 'confirmed',
+            reason: res.data.status === 'cancelled' ? 'cancelled' : 'found',
+        };
+    } catch (error) {
+        if (error.code === 404 || error.code === 410) {
+            return { available: false, reason: 'missing' };
+        }
+        console.error('[Google Calendar] Status check error:', error.message);
+        return { available: null, reason: 'error', error: error.message };
     }
 }
 

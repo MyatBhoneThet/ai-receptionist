@@ -2,15 +2,21 @@
     "name": "ai-receptionist-backend",
     "version": "1.0.0",
     "description": "Express API for AI Hotel & Restaurant Receptionist",
-    "type": "module",
+  "type": "module",
     "main": "index.js",
-    "scripts": {
-        "start": "node index.js",
-        "dev": "nodemon index.js",
-        "db:init": "node scripts/initDb.js"
-    },
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon --legacy-watch --watch index.js --watch middleware --watch routes --watch services --watch validation --watch scripts index.js",
+    "db:init": "node scripts/initDb.js",
+    "db:migrate": "node scripts/migrateDb.js",
+    "db:seed:inventory": "node scripts/seedInventory.js",
+    "test": "NO_LISTEN=true npm run test:api",
+    "test:api": "NODE_ENV=test NODE_OPTIONS=--experimental-vm-modules jest --runInBand"
+  },
     "dependencies": {
         "@google/generative-ai": "^0.21.0",
+        "bcryptjs": "^2.4.3",
+        "cookie-parser": "^1.4.7",
         "cors": "^2.8.5",
         "dotenv": "^16.4.5",
         "express": "^4.18.3",
@@ -18,11 +24,16 @@
         "googleapis": "^171.4.0",
         "groq-sdk": "^0.37.0",
         "helmet": "^8.1.0",
+        "jsonwebtoken": "^9.0.2",
+        "nodemailer": "^6.9.13",
         "pg": "^8.11.5",
+        "twilio": "^5.3.4",
         "uuid": "^9.0.1",
         "zod": "^3.23.8"
     },
-    "devDependencies": {
-        "nodemon": "^3.1.0"
-    }
+  "devDependencies": {
+    "nodemon": "^3.1.0",
+    "supertest": "^7.0.0",
+    "jest": "^29.7.0"
+  }
 }

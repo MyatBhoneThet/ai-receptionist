@@ -2,96 +2,137 @@
 @tailwind components;
 @tailwind utilities;
 
-@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Sans:wght@400;500;700&display=swap');
 
 :root {
-    --foreground-rgb: 255, 255, 255;
-    --background-start-rgb: 15, 23, 42;
-    --background-end-rgb: 2, 6, 23;
+    /* Warm Parchment Palette */
+    --parchment-bg: 249, 247, 242; /* #f9f7f2 */
+    --ink-text: 26, 26, 26;       /* #1a1a1a */
+    --brass-gold: 201, 169, 110;  /* #c9a96e */
+    --stone-50: 248, 250, 252;
+    --paper-edge: 231, 227, 218;  /* Subtle darker parchment for borders */
 }
 
 @layer base {
     body {
-        @apply text-slate-200 antialiased;
-        font-family: 'Outfit', system-ui, sans-serif;
-        color: rgb(var(--foreground-rgb));
-        background: linear-gradient(to bottom,
-                transparent,
-                rgb(var(--background-end-rgb))) rgb(var(--background-start-rgb));
+        @apply antialiased transition-colors duration-500;
+        background-color: rgb(var(--parchment-bg));
+        color: rgb(var(--ink-text));
+        font-family: 'DM Sans', system-ui, sans-serif;
         min-height: 100vh;
         overflow-x: hidden;
     }
 
-    /* Custom scrollbar */
+    h1, h2, h3, .serif {
+        font-family: 'Instrument Serif', serif;
+    }
+
+    /* Custom scrollbar - stylized like an old book edge */
     ::-webkit-scrollbar {
-        width: 6px;
+        width: 8px;
     }
 
     ::-webkit-scrollbar-track {
-        background: transparent;
+        background: rgb(var(--parchment-bg));
     }
 
     ::-webkit-scrollbar-thumb {
-        @apply bg-slate-700/50 rounded-full;
+        background: rgb(var(--paper-edge));
+        border-radius: 4px;
+        border: 2px solid rgb(var(--parchment-bg));
     }
 
     ::-webkit-scrollbar-thumb:hover {
-        @apply bg-slate-600;
+        background: rgb(var(--brass-gold));
     }
 }
 
 @layer utilities {
-    .glass {
-        @apply bg-white/5 backdrop-blur-md border border-white/10;
+    .bg-parchment {
+        background-color: rgb(var(--parchment-bg));
     }
 
-    .glass-dark {
-        @apply bg-slate-950/40 backdrop-blur-xl border border-slate-800/50;
+    .border-parchment {
+        border-color: rgb(var(--paper-edge));
     }
 
-    .glass-card {
-        @apply bg-slate-900/60 backdrop-blur-lg border border-slate-800/80 shadow-2xl;
+    .text-ink {
+        color: rgb(var(--ink-text));
     }
 
-    .text-gradient {
-        @apply bg-clip-text text-transparent bg-gradient-to-r from-primary-400 to-indigo-400;
+    .text-gold {
+        color: rgb(var(--brass-gold));
     }
 
-    .bg-glow {
-        @apply relative;
+    .bg-paper {
+        @apply bg-white shadow-[0_2px_15px_-3px_rgba(0,0,0,0.07),0_10px_20px_-2px_rgba(0,0,0,0.04)] border border-stone-200/60;
     }
 
-    .bg-glow::before {
-        content: '';
-        @apply absolute -inset-0.5 bg-gradient-to-r from-primary-500 to-indigo-500 rounded-lg blur opacity-20 transition duration-1000 group-hover:opacity-40;
+    /* Tactile Materials */
+    .material-parchment {
+        background: linear-gradient(135deg, #fffcf5 0%, #f9f7f2 100%);
+        box-shadow: 
+            inset 0 0 40px rgba(201, 169, 110, 0.03),
+            0 1px 3px rgba(0,0,0,0.05);
+        border: 1px solid #e7e3da;
+    }
+
+    .gold-glow {
+        box-shadow: 0 0 20px rgba(201, 169, 110, 0.15);
+    }
+
+    .gold-glow-strong {
+        box-shadow: 0 0 30px rgba(201, 169, 110, 0.25);
+    }
+
+    .shimmer-gold {
+        background: linear-gradient(
+            90deg,
+            rgba(201, 169, 110, 0) 0%,
+            rgba(201, 169, 110, 0.1) 50%,
+            rgba(201, 169, 110, 0) 100%
+        );
+        background-size: 200% 100%;
+        animation: shimmer 3s infinite;
     }
 }
 
-/* Animations */
-@keyframes fadeIn {
+@keyframes shimmer {
+    0% { background-position: -200% 0; }
+    100% { background-position: 200% 0; }
+}
+
+/* Entrance Animations */
+@keyframes slideUp {
     from {
         opacity: 0;
-        transform: translateY(10px);
+        transform: translateY(20px);
     }
-
     to {
         opacity: 1;
         transform: translateY(0);
     }
 }
 
-.animate-fade-in {
-    animation: fadeIn 0.5s ease-out forwards;
+@keyframes scaleIn {
+    from {
+        opacity: 0;
+        transform: scale(0.95);
+    }
+    to {
+        opacity: 1;
+        transform: scale(1);
+    }
 }
 
-.delay-100 {
-    animation-delay: 0.1s;
+.animate-slide-up {
+    animation: slideUp 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
-.delay-200 {
-    animation-delay: 0.2s;
+.animate-scale-in {
+    animation: scaleIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
-.delay-300 {
-    animation-delay: 0.3s;
-}
+.delay-100 { animation-delay: 0.1s; }
+.delay-200 { animation-delay: 0.2s; }
+.delay-300 { animation-delay: 0.3s; }

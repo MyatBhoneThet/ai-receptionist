@@ -5,22 +5,43 @@ import { confirmBooking } from '../lib/api';
 
 interface ConfirmModalProps {
     sessionId: string;
+    sessionToken: string;
     summary: any;
+    intent: string;
     onConfirm: () => void;
     onCancel: () => void;
 }
 
-export default function ConfirmModal({ sessionId, summary, onConfirm, onCancel }: ConfirmModalProps) {
+export default function ConfirmModal({ sessionId, sessionToken, summary, intent, onConfirm, onCancel }: ConfirmModalProps) {
     const [loading, setLoading] = React.useState(false);
     if (!summary) return null;
 
-    const isCancellation = summary.status === 'confirmed' || summary.status === 'modified';
+    const isCancellation = intent === 'cancel_booking' || intent === 'cancel';
+    const isWaitlist = summary.waitlisted;
+    const formatDate = (value: unknown) => {
+        if (!value) return '';
+        if (typeof value === 'string') {
+            const isoMatch = value.match(/^(\d{4})-(\d{2})-(\d{2})/);
+            if (isoMatch) {
+                const [, yyyy, mm, dd] = isoMatch;
+                return `${dd}-${mm}-${yyyy}`;
+            }
+            return value.slice(0, 10);
+        }
+        if (value instanceof Date) {
+            const yyyy = value.getFullYear();
+            const mm = String(value.getMonth() + 1).padStart(2, '0');
+            const dd = String(value.getDate()).padStart(2, '0');
+            return `${yyyy}-${mm}-${dd}`;
+        }
+        return String(value).slice(0, 10);
+    };
 
     const handleConfirm = async () => {
-        if (loading) return;
+        if (loading || !sessionToken) return;
         setLoading(true);
         try {
-            await confirmBooking(sessionId, isCancellation ? 'cancel' : 'confirm');
+            await confirmBooking(sessionId, sessionToken, isCancellation ? 'cancel' : 'confirm');
             onConfirm();
         } catch (err) {
             console.error('[ConfirmModal] Confirm error:', err);
@@ -31,52 +52,51 @@ export default function ConfirmModal({ sessionId, summary, onConfirm, onCancel }
     };
 
     return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-sm animate-fade-in" role="dialog" aria-modal="true">
-            <div className="glass-card w-full max-w-md overflow-hidden rounded-3xl shadow-2xl animate-fade-in delay-100 border border-slate-700/50">
-                <div className={`${isCancellation ? 'bg-rose-600/10' : 'bg-primary-600/10'} p-8 text-center border-b border-slate-800/50`}>
-                    <div className={`mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl ${isCancellation ? 'bg-rose-600' : 'bg-primary-600'} text-3xl shadow-lg shadow-primary-500/20`}>
-                        {isCancellation ? '🗑️' : '✅'}
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-ink/40 backdrop-blur-md animate-fade-in" role="dialog" aria-modal="true">
+            <div className="bg-white w-full max-w-lg overflow-hidden rounded-[2rem] shadow-2xl animate-scale-in border border-parchment">
+                <div className={`p-10 text-center border-b border-parchment relative overflow-hidden`}>
+                    <div className="absolute inset-0 shimmer-gold opacity-30" />
+                    <div className={`mx-auto mb-6 flex h-20 w-20 items-center justify-center rounded-full bg-parchment border border-gold/20 text-4xl shadow-sm relative z-10`}>
+                        {isCancellation ? '🍷' : '🥂'}
                     </div>
-                    <h2 className="text-xl font-bold text-white">
-                        {isCancellation ? 'Confirm cancellation?' : 'Confirm your booking?'}
+                    <h2 className="text-3xl font-light text-ink serif lowercase relative z-10">
+                        {isCancellation ? 'revisiting your plans?' : isWaitlist ? 'join the waitlist' : 'confirm your selection'}
                     </h2>
-                    <p className="mt-1 text-sm text-slate-400">
-                        {isCancellation ? 'This action cannot be undone.' : 'Please review the details below'}
+                    <p className="mt-2 text-[10px] font-bold uppercase tracking-[0.2em] text-gold relative z-10">
+                        {isCancellation ? 'Once cancelled, the reservation is released' : isWaitlist ? 'We will notify you if a spot opens' : 'Please review your concierge summary'}
                     </p>
                 </div>
 
-                <div className="p-8">
-                    <div className="space-y-4 rounded-2xl bg-slate-950/50 p-5 ring-1 ring-slate-800/50">
+                <div className="p-10">
+                    <div className="space-y-5 p-2">
                         {[
                             { label: 'Service', value: summary.service_type },
-                            { label: 'Date', value: summary.date },
+                            { label: 'Date', value: formatDate(summary.date) },
                             { label: 'Time', value: summary.start_time ? `${summary.start_time}${summary.end_time ? ` – ${summary.end_time}` : ''}` : null },
                             { label: 'Guests', value: summary.people },
-                            { label: 'Location', value: summary.location },
-                            { label: 'Notes', value: summary.notes },
-                            { label: 'Reserved for', value: summary.reservation_name },
+                            { label: 'Name', value: summary.reservation_name },
                         ].map((item) => item.value && (
-                            <div key={item.label} className="flex justify-between items-center text-sm">
-                                <span className="text-slate-500 font-medium">{item.label}</span>
-                                <span className="text-slate-200 font-bold">{String(item.value)}</span>
+                            <div key={item.label} className="flex justify-between items-baseline border-b border-ink/5 pb-2 last:border-0 last:pb-0">
+                                <span className="text-[10px] font-bold uppercase tracking-widest text-ink/30 serif">{item.label}</span>
+                                <span className="text-sm font-bold text-ink serif">{String(item.value)}</span>
                             </div>
                         ))}
                     </div>
 
-                    <div className="mt-8 flex gap-3">
+                    <div className="mt-10 flex gap-4">
                         <button
-                            className="flex-1 rounded-xl bg-slate-800 py-3.5 text-sm font-bold text-slate-300 transition-all hover:bg-slate-700 hover:text-white disabled:opacity-50"
+                            className="flex-1 rounded-full border border-ink/10 py-5 text-[11px] font-bold uppercase tracking-widest text-ink/40 transition-all hover:bg-parchment hover:text-ink disabled:opacity-50"
                             onClick={onCancel}
                             disabled={loading}
                         >
-                            {isCancellation ? 'Keep it' : 'Edit Details'}
+                            {isCancellation ? 'keep booking' : 'amend details'}
                         </button>
                         <button
-                            className={`flex-1 rounded-xl ${isCancellation ? 'bg-rose-600 hover:bg-rose-500' : 'bg-primary-600 hover:bg-primary-500'} py-3.5 text-sm font-bold text-white shadow-lg shadow-primary-500/20 transition-all active:scale-95 disabled:opacity-50`}
+                            className={`flex-1 rounded-full ${isCancellation ? 'bg-ink' : 'bg-gold shadow-lg shadow-gold/20'} py-5 text-[11px] font-bold uppercase tracking-widest text-ink transition-all hover:scale-105 active:scale-95 disabled:opacity-50`}
                             onClick={handleConfirm}
-                            disabled={loading}
+                            disabled={loading || !sessionToken}
                         >
-                            {loading ? 'Processing...' : (isCancellation ? 'Cancel Booking' : 'Confirm Booking')}
+                            {loading ? 'Processing...' : (isCancellation ? 'Cancel Reservation' : isWaitlist ? 'Join Waitlist' : 'Complete Booking')}
                         </button>
                     </div>
                 </div>

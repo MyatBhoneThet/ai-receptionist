@@ -4,13 +4,17 @@ import 'dotenv/config';
 const { Pool } = pkg;
 
 const isProduction = process.env.NODE_ENV === 'production';
+const requiresSsl = process.env.DATABASE_URL?.includes('sslmode=');
+const rejectUnauthorized = process.env.DB_SSL_REJECT_UNAUTHORIZED !== 'false';
 
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
-    ssl: isProduction
-        ? { rejectUnauthorized: false }
-        : (process.env.DATABASE_URL?.includes('sslmode=') ? true : false),
+    ssl: isProduction || requiresSsl
+        ? { rejectUnauthorized }
+        : false,
 });
+
+const logQueries = process.env.DB_QUERY_LOGGING === 'true';
 
 // Handle unexpected idle client errors
 pool.on('error', (err) => {
@@ -24,9 +28,9 @@ export async function query(text, params) {
         const res = await pool.query(text, params);
         const duration = Date.now() - start;
 
-        console.log(
-            `[DB] query="${text.slice(0, 60)}..." duration=${duration}ms rows=${res.rowCount}`
-        );
+        if (logQueries) {
+            console.log(`[DB] duration=${duration}ms rows=${res.rowCount}`);
+        }
 
         return res;
     } catch (err) {

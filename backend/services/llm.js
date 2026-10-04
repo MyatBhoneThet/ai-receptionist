@@ -5,21 +5,34 @@ const groq = new Groq({
     apiKey: process.env.GROQ_API_KEY,
 });
 
-export async function chat(history, userMessage, today, state = {}) {
-    // Minimal state (token-efficient)
+function formatDate(date) {
+    if (!date) return "";
+    if (typeof date === 'string') return date;
+    if (date instanceof Date) {
+        const dd = String(date.getUTCDate()).padStart(2, '0');
+        const mm = String(date.getUTCMonth() + 1).padStart(2, '0');
+        const yyyy = date.getUTCFullYear();
+        return `${dd}-${mm}-${yyyy}`;
+    }
+    return String(date);
+}
+
+export async function chat(history, userMessage, today, state = {}, customerContext = "") {
+    // Minimal state (token-efficient) - Ensure all dates are strings
     const minimalState = {
         service_type: state?.service_type || "",
-        date: state?.date || "",
+        date: formatDate(state?.date),
+        end_date: formatDate(state?.end_date),
         start_time: state?.start_time || "",
         end_time: state?.end_time || "",
         people: state?.people ?? null,
-        location: state?.location || "",
         reservation_name: state?.reservation_name || "",
+        phone_number: state?.phone_number || "",
     };
 
     // Limit history safely
     const trimmedHistory = Array.isArray(history)
-        ? history.slice(-4)
+        ? history.slice(-10)
         : [];
 
     const messages = [
@@ -37,6 +50,7 @@ export async function chat(history, userMessage, today, state = {}) {
                 today,
                 state: minimalState,
                 message: userMessage,
+                customer_context: customerContext || "",
             }),
         },
     ];
@@ -47,7 +61,7 @@ export async function chat(history, userMessage, today, state = {}) {
 
             messages,
 
-            temperature: 0.2,
+            temperature: 0.08,
             max_tokens: 500,
 
             response_format: { type: 'json_object' },
@@ -73,14 +87,15 @@ export async function chat(history, userMessage, today, state = {}) {
             speak: parsed.speak || parsed.message || "",
             intent: parsed.intent || "unknown",
             data: {
-                service_type: parsed.data?.service_type || "",
-                date: parsed.data?.date || "",
-                start_time: parsed.data?.start_time || "",
-                end_time: parsed.data?.end_time || "",
-                people: parsed.data?.people ?? null,
-                location: parsed.data?.location || "",
-                notes: parsed.data?.notes || "",
-                reservation_name: parsed.data?.reservation_name || "",
+                service_type: parsed.data?.service_type || state.service_type || "",
+                date: formatDate(parsed.data?.date || state.date),
+                end_date: formatDate(parsed.data?.end_date || state.end_date),
+                start_time: parsed.data?.start_time || state.start_time || "",
+                end_time: parsed.data?.end_time || state.end_time || "",
+                people: parsed.data?.people ?? state.people ?? null,
+                notes: parsed.data?.notes || state.notes || "",
+                reservation_name: parsed.data?.reservation_name || state.reservation_name || "",
+                phone_number: parsed.data?.phone_number || state.phone_number || "",
             },
             missing_fields: parsed.missing_fields || [],
             confidence: parsed.confidence ?? 0,
@@ -96,12 +111,13 @@ export async function chat(history, userMessage, today, state = {}) {
             data: {
                 service_type: "",
                 date: "",
+                end_date: "",
                 start_time: "",
                 end_time: "",
                 people: null,
-                location: "",
                 notes: "",
                 reservation_name: "",
+                phone_number: "",
             },
             missing_fields: [],
             confidence: 0,

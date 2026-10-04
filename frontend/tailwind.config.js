@@ -20,6 +20,9 @@ module.exports = {
           900: '#4c1d95',
           950: '#2e1065',
         },
+        ink: '#1a1a1a',
+        gold: '#c9a96e',
+        parchment: '#f9f7f2',
       },
       backgroundImage: {
         'gradient-radial': 'radial-gradient(var(--tw-gradient-stops))',

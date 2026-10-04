@@ -37,3 +37,13 @@ export const bookingsLimiter = rateLimit({
     message: 'Too many booking requests. Please try again in a moment.',
     handler: rateLimitHandler,
 });
+
+// Auth limiter — protect login endpoint
+export const authLimiter = rateLimit({
+    windowMs: 1 * 60 * 1000, // 1 minute
+    max: 5,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: 'Too many login attempts. Please wait a minute.',
+    handler: rateLimitHandler,
+});

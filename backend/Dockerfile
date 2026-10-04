@@ -1,20 +1,13 @@
-# Base image
-FROM node:18-alpine
-
-# Set working directory
+FROM node:20-alpine AS deps
 WORKDIR /app
-
-# Copy package files
 COPY package*.json ./
+RUN npm ci --omit=dev
 
-# Install dependencies
-RUN npm install
-
-# Copy all files
+FROM node:20-alpine AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-
-# Expose port
+USER node
 EXPOSE 4000
-
-# Start app in development mode
-CMD ["npm", "run", "dev"]
+CMD ["npm", "start"]
