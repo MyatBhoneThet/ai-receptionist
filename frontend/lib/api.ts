@@ -143,10 +143,22 @@ export async function sendMessage(session_id: string, message: string): Promise<
 }
 
 /**
+ * Clear conversation history while keeping the session's reservations accessible.
+ */
+export async function resetConversation(session_id: string, session_token: string): Promise<void> {
+    await api.post('/api/chat/reset', { session_id, session_token }, {
+        headers: {
+            'X-Session-Id': session_id,
+            'X-Session-Token': session_token,
+        },
+    });
+}
+
+/**
  * Confirm the pending booking for a session
  */
-export async function confirmBooking(session_id: string, session_token: string, action?: 'confirm' | 'cancel'): Promise<ConfirmBookingResponse> {
-    const { data } = await api.post<ConfirmBookingResponse>('/api/chat/confirm', { session_id, session_token, action }, {
+export async function confirmBooking(session_id: string, session_token: string, action?: 'confirm' | 'cancel', booking_id?: string | number): Promise<ConfirmBookingResponse> {
+    const { data } = await api.post<ConfirmBookingResponse>('/api/chat/confirm', { session_id, session_token, action, booking_id }, {
         headers: {
             'X-Session-Id': session_id,
             'X-Session-Token': session_token,

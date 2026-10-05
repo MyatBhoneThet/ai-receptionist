@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import ChatWindow from '../components/ChatWindow';
 import VoiceInput from '../components/VoiceInput';
@@ -8,7 +8,7 @@ import TextInput from '../components/TextInput';
 import BookingSummary from '../components/BookingSummary';
 import ConfirmModal from '../components/ConfirmModal';
 import ThinkingOrb from '../components/ThinkingOrb';
-import { sendMessage, ChatResponse, BookingData, ConfirmBookingResponse } from '../lib/api';
+import { sendMessage, resetConversation, ChatResponse, BookingData, ConfirmBookingResponse } from '../lib/api';
 
 /**
  * Speak a string using Web Speech Synthesis
@@ -61,6 +61,8 @@ export default function Page() {
 
     const [messages, setMessages] = useState<Message[]>([]);
     const [loading, setLoading] = useState<boolean>(false);
+    const [resetting, setResetting] = useState<boolean>(false);
+    const [resetError, setResetError] = useState<string>('');
     const [currentData, setCurrentData] = useState<BookingData | null>(null);
     const [currentIntent, setCurrentIntent] = useState<string>('');
     const [missingFields, setMissingFields] = useState<string[]>([]);
@@ -71,9 +73,18 @@ export default function Page() {
     const [speechError, setSpeechError] = useState<string>('');
     const [inputValue, setInputValue] = useState<string>('');
     const [speechLang, setSpeechLang] = useState<string>('en-US');
+    const confirmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    useEffect(() => () => {
+        if (confirmTimer.current) clearTimeout(confirmTimer.current);
+    }, []);
 
     const handleSend = useCallback(async (text: string) => {
-        if (!text.trim() || loading) return;
+        if (!text.trim() || loading || resetting) return;
+        if (confirmTimer.current) {
+            clearTimeout(confirmTimer.current);
+            confirmTimer.current = null;
+        }
 
         setMessages((prev) => [...prev, { role: 'user', content: text }]);
         setInterimTranscript('');
@@ -101,22 +112,59 @@ export default function Page() {
 
             const bookable = ['book_restaurant', 'book_hotel', 'book_meeting'];
             if (bookable.includes(response.intent) && (!response.missing_fields || response.missing_fields.length === 0)) {
-                setTimeout(() => setShowConfirm(true), 800);
+                confirmTimer.current = setTimeout(() => setShowConfirm(true), 800);
             }
 
             // @ts-ignore
             if (response.show_cancel_confirm) {
-                setTimeout(() => setShowConfirm(true), 800);
+                confirmTimer.current = setTimeout(() => setShowConfirm(true), 800);
             }
         } catch (err) {
             console.error('[handleSend] Error:', err);
+            const errorData = err && typeof err === 'object' && 'response' in err
+                && err.response && typeof err.response === 'object' && 'data' in err.response
+                ? err.response.data : null;
+            if (errorData && typeof errorData === 'object' && 'session_token' in errorData
+                && typeof errorData.session_token === 'string' && errorData.session_token) {
+                setSessionToken(errorData.session_token);
+                localStorage.setItem('ai_receptionist_session_token', errorData.session_token);
+            }
             const errorMsg = "Sorry, something went wrong. Please try again.";
             setMessages((prev) => [...prev, { role: 'assistant', content: errorMsg }]);
             speakText(errorMsg);
         } finally {
             setLoading(false);
         }
-    }, [loading, sessionId]);
+    }, [loading, resetting, sessionId]);
+
+    const handleClearConversation = async () => {
+        if (loading || resetting || !sessionId) return;
+        setResetting(true);
+        setResetError('');
+        if (confirmTimer.current) {
+            clearTimeout(confirmTimer.current);
+            confirmTimer.current = null;
+        }
+        try {
+            if (sessionToken) await resetConversation(sessionId, sessionToken);
+            window.speechSynthesis?.cancel();
+            setMessages([]);
+            setCurrentData(null);
+            setCurrentIntent('');
+            setMissingFields([]);
+            setConfidence(0);
+            setShowConfirm(false);
+            setInterimTranscript('');
+            setInputValue('');
+            setIsListening(false);
+            setSpeechError('');
+        } catch (err) {
+            console.error('[handleClearConversation] Error:', err);
+            setResetError('The conversation could not be cleared. Please try again.');
+        } finally {
+            setResetting(false);
+        }
+    };
 
     const handleVoiceTranscript = useCallback((text: string) => {
         setInterimTranscript('');
@@ -249,7 +297,7 @@ export default function Page() {
                                         if (next) setSpeechError('');
                                     }}
                                     onError={setSpeechError}
-                                    disabled={loading}
+                                    disabled={loading || resetting}
                                     lang={speechLang}
                                 />
                                 <div className="min-w-0 flex-1 space-y-3">
@@ -267,7 +315,7 @@ export default function Page() {
                                             <option value="th-TH">ไทย</option>
                                         </select>
                                     </div>
-                                    <TextInput onSend={handleTextSend} disabled={loading} value={inputValue} onChangeValue={setInputValue} />
+                                    <TextInput onSend={handleTextSend} disabled={loading || resetting} value={inputValue} onChangeValue={setInputValue} />
                                 </div>
                             </div>
                             {speechError && <p className="mt-3 text-xs text-ink/70" role="alert">{speechError}</p>}
@@ -293,15 +341,13 @@ export default function Page() {
 
                     <div className="mt-8">
                          <button
-                            className="w-full flex items-center justify-center space-x-2 rounded-full border border-ink/10 p-4 text-xs font-bold text-ink/60 transition-all hover:bg-ink hover:text-white"
-                            onClick={() => {
-                                localStorage.removeItem('ai_receptionist_session');
-                                localStorage.removeItem('ai_receptionist_session_token');
-                                window.location.reload();
-                            }}
+                            className="w-full flex items-center justify-center space-x-2 rounded-full border border-ink/10 p-4 text-xs font-bold text-ink/60 transition-all hover:bg-ink hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+                            disabled={loading || resetting || !sessionId}
+                            onClick={handleClearConversation}
                         >
-                            <span>Clear Conversation</span>
+                            <span>{resetting ? 'Clearing Conversation…' : 'Clear Conversation'}</span>
                         </button>
+                        {resetError && <p className="mt-3 text-xs text-ink/70" role="alert">{resetError}</p>}
                     </div>
                 </aside>
 

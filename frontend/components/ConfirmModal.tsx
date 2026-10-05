@@ -43,7 +43,7 @@ export default function ConfirmModal({ sessionId, sessionToken, summary, intent,
         setLoading(true);
         setError('');
         try {
-            const response = await confirmBooking(sessionId, sessionToken, isCancellation ? 'cancel' : 'confirm');
+            const response = await confirmBooking(sessionId, sessionToken, isCancellation ? 'cancel' : 'confirm', summary.edit_booking_id || summary.id);
             if (!response.success) {
                 setError(response.message || 'The booking could not be saved. Please try again.');
                 return;

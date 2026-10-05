@@ -233,6 +233,12 @@ const query = jest.fn(async (sql, params = []) => {
     return makeRows([]);
   }
 
+  if (normalized.startsWith('delete from conversations where session_id = $1')) {
+    const removed = state.conversations.filter((item) => item.session_id === params[0]);
+    state.conversations = state.conversations.filter((item) => item.session_id !== params[0]);
+    return makeRows(removed);
+  }
+
   if (normalized.startsWith('select name, preferences from customers where phone_number = $1')) {
     const row = state.customers.find((item) => item.phone_number === params[0]);
     return makeRows(row ? [row] : []);
@@ -563,8 +569,22 @@ const query = jest.fn(async (sql, params = []) => {
   }
 
   if (normalized.startsWith('select * from bookings where id = $1')) {
-    const row = state.bookings.find((item) => String(item.id) === String(params[0]));
+    const row = state.bookings.find((item) => String(item.id) === String(params[0]) &&
+      (!normalized.includes('status in') || ['pending', 'confirmed', 'modified'].includes(item.status))
+    );
     return makeRows(row ? [row] : []);
+  }
+
+  if (normalized.startsWith('select * from bookings where status in') && normalized.includes('regexp_replace')) {
+    const [serviceType, date, reservationName, originalPhone] = params;
+    const rows = state.bookings.filter((item) =>
+      ['pending', 'confirmed', 'modified'].includes(item.status) &&
+      item.service_type === serviceType &&
+      toDateKey(item.date) === toDateKey(date) &&
+      String(item.reservation_name || '').toLowerCase() === String(reservationName || '').toLowerCase() &&
+      String(item.contact_phone || '').replace(/\D/g, '') === originalPhone
+    );
+    return makeRows(rows.slice().reverse().slice(0, 2));
   }
 
   if (
@@ -620,7 +640,9 @@ const query = jest.fn(async (sql, params = []) => {
   }
 
   if (normalized.startsWith('update bookings set')) {
-    const row = state.bookings.find((item) => String(item.id) === String(params[params.length - 1]));
+    const row = state.bookings.find((item) => String(item.id) === String(params[params.length - 1]) &&
+      (!normalized.includes('status in') || ['pending', 'confirmed', 'modified'].includes(item.status))
+    );
     if (!row) return makeRows([]);
     applyAssignments(row, normalized, params);
     if (normalized.includes("status = case when status = 'confirmed'") && row.status === 'confirmed') {
@@ -1206,10 +1228,10 @@ const runRoutes = process.env.NO_LISTEN !== 'true';
 
     async function startFailedLookup() {
       const response = await send('I want to change my meeting reservation on 14-10-2026 under the name Stuart');
-      expect(response.body.message).toContain("I couldn't find a meeting reservation for 14-10-2026");
+      expect(response.body.message).toMatch(/phone/i);
       expect(response.body.data).toEqual(expect.objectContaining({
         date: '14-10-2026', service_type: 'meeting', reservation_name: 'Stuart',
-        modify_step: 'awaiting_lookup',
+        modify_step: 'awaiting_verification',
       }));
       expect(response.body.data.edit_booking_id).toBeUndefined();
       expectLookupDidNotMutateBookings();
@@ -1244,7 +1266,7 @@ const runRoutes = process.env.NO_LISTEN !== 'true';
       const response = await send(`The name is ${name}`);
       expect(response.body.data).toEqual(expect.objectContaining({
         date: '14-10-2026', service_type: 'meeting', reservation_name: name,
-        modify_step: 'awaiting_lookup',
+        modify_step: 'awaiting_verification',
       }));
       expect(mockChat).not.toHaveBeenCalled();
       expectLookupDidNotMutateBookings();
@@ -1253,10 +1275,10 @@ const runRoutes = process.env.NO_LISTEN !== 'true';
     it('changes only the explicitly corrected date while retaining the lookup name and service', async () => {
       await startFailedLookup();
       const response = await send('Actually, 12-10-2026');
-      expect(response.body.message).toContain('meeting reservation for 12-10-2026 under the name "Stuart"');
+      expect(response.body.message).toMatch(/phone/i);
       expect(response.body.data).toEqual(expect.objectContaining({
         date: '12-10-2026', service_type: 'meeting', reservation_name: 'Stuart',
-        modify_step: 'awaiting_lookup',
+        modify_step: 'awaiting_verification',
       }));
       expect(response.body.data.edit_booking_id).toBeUndefined();
       expect(mockChat).not.toHaveBeenCalled();
@@ -1268,9 +1290,9 @@ const runRoutes = process.env.NO_LISTEN !== 'true';
       const response = await send('Find my reservation');
       expect(response.body.data).toEqual(expect.objectContaining({
         date: '14-10-2026', service_type: 'meeting', reservation_name: 'Stuart',
-        modify_step: 'awaiting_lookup',
+        modify_step: 'awaiting_verification',
       }));
-      expect(response.body.message).toContain('meeting reservation for 14-10-2026 under the name "Stuart"');
+      expect(response.body.message).toMatch(/phone/i);
       expect(mockChat).not.toHaveBeenCalled();
       expectLookupDidNotMutateBookings();
     });
@@ -1397,7 +1419,7 @@ const runRoutes = process.env.NO_LISTEN !== 'true';
       const failed = await send('I want to change my restaurant reservation on 14-10-2026 under the name Steward');
       expect(failed.body.data).toEqual(expect.objectContaining({
         service_type: 'restaurant', date: '14-10-2026', reservation_name: 'Steward',
-        modify_step: 'awaiting_lookup',
+        modify_step: 'awaiting_verification',
       }));
       expect(failed.body.data.edit_booking_id).toBeUndefined();
       const response = await send(correction);
@@ -1441,6 +1463,344 @@ const runRoutes = process.env.NO_LISTEN !== 'true';
       expect(mockChat).not.toHaveBeenCalled();
       expectNoBookingChanges();
       expectMeetingFound(await send('meeting'));
+    });
+  });
+
+  describe('reservation recovery across conversations', () => {
+    let fixtureNumber = 0;
+    let sessionId;
+    let originalBookings;
+
+    beforeEach(() => {
+      sessionId = `sess-recovery-${++fixtureNumber}`;
+      state.bookings.push({
+        id: 90,
+        session_id: `sess-original-${fixtureNumber}`,
+        service_type: 'meeting',
+        date: '2026-10-14',
+        start_time: '09:00:00',
+        end_time: '10:00:00',
+        reservation_name: 'Steward',
+        people: 7,
+        notes: 'Original customer note',
+        status: 'confirmed',
+        waitlisted: false,
+        contact_phone: '080-111-1111',
+        contact_email: 'steward@example.com',
+        google_event_id: 'recovered-meeting-event',
+        created_at: new Date('2026-10-01T00:00:00Z'),
+        updated_at: new Date('2026-10-01T00:00:00Z'),
+      }, {
+        id: 91,
+        session_id: sessionId,
+        service_type: 'restaurant',
+        date: '2026-10-12',
+        start_time: '18:00:00',
+        end_time: '19:00:00',
+        reservation_name: 'Other guest',
+        people: 2,
+        status: 'pending',
+        waitlisted: false,
+        contact_phone: '0802222222',
+        created_at: new Date('2026-10-05T00:00:00Z'),
+        updated_at: new Date('2026-10-05T00:00:00Z'),
+      });
+      originalBookings = state.bookings.map(cloneRow);
+      query.mockClear();
+    });
+
+    async function send(message) {
+      const response = await request(app).post('/api/chat').send({ session_id: sessionId, message });
+      expect(response.status).toBe(200);
+      return response;
+    }
+
+    async function startRecovery(action = 'alter') {
+      return send(`I want to ${action} my meeting reservation on 14-10-2026 under the name Steward`);
+    }
+
+    function expectUnverified(response) {
+      expect(response.body.data).toEqual(expect.objectContaining({
+        service_type: 'meeting', date: '14-10-2026', reservation_name: 'Steward',
+        modify_step: 'awaiting_verification',
+      }));
+      expect(response.body.missing_fields).toEqual(['phone number']);
+      expect(response.body.data.id).toBeUndefined();
+      expect(response.body.data.booking_id).toBeUndefined();
+      expect(response.body.data.edit_booking_id).toBeUndefined();
+      expect(response.body.show_cancel_confirm).not.toBe(true);
+      expect(response.body.show_reservation_slip).not.toBe(true);
+      expect(JSON.stringify(response.body)).not.toMatch(/080-111-1111|steward@example\.com|Original customer note|sess-original-/);
+    }
+
+    function expectNoBookingChanges() {
+      expect(state.bookings).toEqual(originalBookings);
+      expect(mockUpsertEvent).not.toHaveBeenCalled();
+      expect(query.mock.calls.filter(([sql]) =>
+        /^(?:insert into|update|delete from) bookings\b/.test(normalizeSql(sql))
+      )).toEqual([]);
+    }
+
+    function expectRecovered(response) {
+      expect(response.body.data).toEqual(expect.objectContaining({
+        service_type: 'meeting', date: '14-10-2026', reservation_name: 'Steward',
+        edit_booking_id: 90, modify_step: 'choose_field', people: 7,
+      }));
+      expect(response.body.data.session_id).toBeUndefined();
+      expect(response.body.message).toContain("I've found your meeting reservation");
+    }
+
+    it('requests the original contact phone instead of denying a reservation from another conversation', async () => {
+      expectUnverified(await startRecovery());
+      expect(mockChat).not.toHaveBeenCalled();
+      expect(query.mock.calls.filter(([sql]) => normalizeSql(sql).includes('regexp_replace'))).toEqual([]);
+      expectNoBookingChanges();
+    });
+
+    it.each(['0801111111', '080 111 1111', 'The original phone number is 080-111-1111'])(
+      'recovers exact criteria with the normalized original phone "%s"',
+      async (phone) => {
+        await startRecovery();
+        expectRecovered(await send(phone));
+        expect(mockChat).not.toHaveBeenCalled();
+        expectNoBookingChanges();
+      }
+    );
+
+    it('keeps the request unverified after the wrong phone without leaking customer details or changing bookings', async () => {
+      await startRecovery();
+      expectUnverified(await send('0809999999'));
+      expect(mockChat).not.toHaveBeenCalled();
+      expectNoBookingChanges();
+      expectRecovered(await send('0801111111'));
+    });
+
+    it.each([
+      ['meeting', '14-10-2026', 'Stuart', 'The name is Steward'],
+      ['meeting', '12-10-2026', 'Steward', 'Actually, 14-10-2026'],
+      ['restaurant', '14-10-2026', 'Steward', 'The reservation type is meeting'],
+    ])('allows a %s/%s/%s criterion correction during verification', async (type, date, name, correction) => {
+      await send(`I want to alter my ${type} reservation on ${date} under the name ${name}`);
+      expectUnverified(await send(correction));
+      expectRecovered(await send('0801111111'));
+      expectNoBookingChanges();
+    });
+
+    it('does not choose a record when the verified details match multiple active reservations', async () => {
+      state.bookings.push({ ...state.bookings.find((booking) => booking.id === 90), id: 92 });
+      originalBookings = state.bookings.map(cloneRow);
+      await startRecovery();
+      expectUnverified(await send('0801111111'));
+      expectNoBookingChanges();
+    });
+
+    it('accepts an ISO date correction during verification without interpreting it as a phone number', async () => {
+      await send('I want to alter my meeting reservation on 12-10-2026 under the name Steward');
+      expectUnverified(await send('2026-10-14'));
+      expect(query.mock.calls.filter(([sql]) => normalizeSql(sql).includes('regexp_replace'))).toEqual([]);
+      expectRecovered(await send('0801111111'));
+      expectNoBookingChanges();
+    });
+
+    it('does not parse a labelled date-shaped original phone as a lookup date correction', async () => {
+      state.bookings.find((booking) => booking.id === 90).contact_phone = '2026-10-12';
+      originalBookings = state.bookings.map(cloneRow);
+      await startRecovery();
+      expectRecovered(await send('The phone number is 2026-10-12'));
+      expectNoBookingChanges();
+    });
+
+    it('updates the verified selected booking while preserving its original session and the newer current-session reservation', async () => {
+      await startRecovery();
+      expectRecovered(await send('0801111111'));
+      const response = await send('Change the date to 15-10-2026 and the guests to eight');
+      expect(response.body.data.date).toBe('15-10-2026');
+      expect(response.body.data.people).toBe(8);
+      expect(response.body.data.session_id).toBeUndefined();
+      expect(state.bookings.find((booking) => booking.id === 90)).toEqual(expect.objectContaining({
+        date: '2026-10-15', people: 8, status: 'modified', session_id: `sess-original-${fixtureNumber}`,
+      }));
+      expect(state.bookings.find((booking) => booking.id === 91)).toEqual(originalBookings.find((booking) => booking.id === 91));
+      expect(mockUpsertEvent).toHaveBeenCalledWith(expect.objectContaining({ id: 90, date: '2026-10-15', people: 8 }));
+    });
+
+    it('cancels the recovered selection rather than the newest booking from the current conversation', async () => {
+      expectUnverified(await startRecovery('cancel'));
+      const verified = await send('0801111111');
+      expect(verified.body.intent).toBe('cancel_booking');
+      expect(verified.body.show_cancel_confirm).toBe(true);
+      expect(verified.body.data.edit_booking_id).toBe(90);
+      expect(verified.body.data.session_id).toBeUndefined();
+      expectNoBookingChanges();
+
+      const response = await request(app).post('/api/chat/confirm')
+        .set('X-Session-Token', verified.body.session_token)
+        .send({ session_id: sessionId, action: 'cancel' });
+      expect(response.status).toBe(200);
+      expect(response.body.booking_id).toBe(90);
+      expect(state.bookings.find((booking) => booking.id === 90).status).toBe('cancelled');
+      expect(state.bookings.find((booking) => booking.id === 91)).toEqual(originalBookings.find((booking) => booking.id === 91));
+    });
+
+    it('uses the recovered selection for "cancel my meeting" and revokes edit access once cancelled', async () => {
+      await startRecovery();
+      await send('0801111111');
+      const selected = await send('Cancel my meeting');
+      expect(selected.body.intent).toBe('cancel_booking');
+      expect(selected.body.show_cancel_confirm).toBe(true);
+      expect(selected.body.data.edit_booking_id).toBe(90);
+      expect(selected.body.missing_fields).toEqual([]);
+      const cancelled = await request(app).post('/api/chat/confirm')
+        .set('X-Session-Token', selected.body.session_token)
+        .send({ session_id: sessionId, action: 'cancel' });
+      expect(cancelled.status).toBe(200);
+      expect(cancelled.body.booking_id).toBe(90);
+      mockUpsertEvent.mockClear();
+      originalBookings = state.bookings.map(cloneRow);
+      const laterEdit = await send('Change the guests to eight');
+      expect(laterEdit.body.data.edit_booking_id).toBeUndefined();
+      expect(state.bookings).toEqual(originalBookings);
+      expect(mockUpsertEvent).not.toHaveBeenCalled();
+    });
+
+    it('does not edit or resync a selected reservation that has since been cancelled', async () => {
+      await startRecovery();
+      await send('0801111111');
+      state.bookings.find((booking) => booking.id === 90).status = 'cancelled';
+      originalBookings = state.bookings.map(cloneRow);
+      const response = await send('Change the guests to eight');
+      expect(response.body.message).not.toContain("updated your meeting reservation");
+      expect(state.bookings).toEqual(originalBookings);
+      expect(mockUpsertEvent).not.toHaveBeenCalled();
+    });
+
+    it('does not cancel a different current-session booking while the requested reservation is still unverified', async () => {
+      const pending = await startRecovery('cancel');
+      const response = await request(app).post('/api/chat/confirm')
+        .set('X-Session-Token', pending.body.session_token)
+        .send({ session_id: sessionId, action: 'cancel' });
+      expect(response.status).toBe(200);
+      expect(response.body.success).toBe(false);
+      expectNoBookingChanges();
+    });
+
+    it('confirms the modified recovered selection rather than the latest current-session reservation', async () => {
+      await startRecovery();
+      await send('0801111111');
+      const updated = await send('Change the guests to eight');
+      expect(state.bookings.find((booking) => booking.id === 90).status).toBe('modified');
+      mockUpsertEvent.mockClear();
+      const response = await request(app).post('/api/chat/confirm')
+        .set('X-Session-Token', updated.body.session_token)
+        .send({ session_id: sessionId, action: 'confirm' });
+      expect(response.status).toBe(200);
+      expect(response.body.success).toBe(true);
+      expect(response.body.booking_id).toBe(90);
+      expect(state.bookings.find((booking) => booking.id === 90).status).toBe('confirmed');
+      expect(state.bookings.find((booking) => booking.id === 91)).toEqual(originalBookings.find((booking) => booking.id === 91));
+      expect(mockUpsertEvent).toHaveBeenCalledWith(expect.objectContaining({ id: 90, people: 8 }));
+    });
+
+    it('does not fall back to another booking if the recovered selection is no longer active', async () => {
+      await startRecovery();
+      const verified = await send('0801111111');
+      state.bookings.find((booking) => booking.id === 90).status = 'cancelled';
+      originalBookings = state.bookings.map(cloneRow);
+      const response = await request(app).post('/api/chat/confirm')
+        .set('X-Session-Token', verified.body.session_token)
+        .send({ session_id: sessionId, action: 'cancel' });
+      expect(response.status).toBe(200);
+      expect(response.body.success).toBe(false);
+      expectNoBookingChanges();
+    });
+
+    it('rejects a submitted booking ID that differs from the server-verified selection', async () => {
+      await startRecovery();
+      const verified = await send('0801111111');
+      const response = await request(app).post('/api/chat/confirm')
+        .set('X-Session-Token', verified.body.session_token)
+        .send({ session_id: sessionId, booking_id: 91, action: 'cancel' });
+      expect(response.status).toBe(200);
+      expect(response.body.success).toBe(false);
+      expectNoBookingChanges();
+    });
+
+    it('does not cancel the latest current-session booking when a recovered selection was lost during reset', async () => {
+      await startRecovery();
+      const verified = await send('0801111111');
+      const reset = await request(app).post('/api/chat/reset')
+        .set('X-Session-Token', verified.body.session_token)
+        .send({ session_id: sessionId });
+      expect(reset.status).toBe(200);
+      const response = await request(app).post('/api/chat/confirm')
+        .set('X-Session-Token', verified.body.session_token)
+        .send({ session_id: sessionId, booking_id: 90, action: 'cancel' });
+      expect(response.status).toBe(200);
+      expect(response.body.success).toBe(false);
+      expectNoBookingChanges();
+    });
+
+    it.each(['modify_booking', 'cancel_booking'])('applies phone verification to a model-inferred %s too', async (intent) => {
+      mockChat.mockResolvedValue({
+        ...defaultChatResponse,
+        intent,
+        data: { service_type: 'meeting', date: '14-10-2026', reservation_name: 'Steward' },
+      });
+      const response = await send('Please handle that request');
+      expectUnverified(response);
+      expect(mockChat).toHaveBeenCalledTimes(1);
+      expectNoBookingChanges();
+      const verified = await send('0801111111');
+      expect(verified.body.data.edit_booking_id).toBe(90);
+      expect(verified.body.data.session_id).toBeUndefined();
+      if (intent === 'cancel_booking') expect(verified.body.show_cancel_confirm).toBe(true);
+      else expectRecovered(verified);
+      expect(mockChat).toHaveBeenCalledTimes(1);
+    });
+
+    it('requires a matching signed session token before clearing stored conversations', async () => {
+      state.conversations.push({ session_id: sessionId, role: 'user', content: 'Keep until authorized' });
+      const noToken = await request(app).post('/api/chat/reset').send({ session_id: sessionId });
+      const anotherSessionToken = await request(app).post('/api/chat/reset')
+        .set('X-Session-Token', createSessionToken('another-session'))
+        .send({ session_id: sessionId });
+      expect(noToken.status).toBe(401);
+      expect(anotherSessionToken.status).toBe(401);
+      expect(state.conversations).toHaveLength(1);
+      expectNoBookingChanges();
+    });
+
+    it('returns the signed session token after the first chat fails so that conversation reset still works', async () => {
+      mockChat.mockRejectedValueOnce(new Error('Upstream model unavailable'));
+      const errorLog = jest.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const failed = await request(app).post('/api/chat').send({ session_id: sessionId, message: 'Hello there' });
+        expect(failed.status).toBe(500);
+        expect(failed.body.session_token).toBe(createSessionToken(sessionId));
+        const reset = await request(app).post('/api/chat/reset')
+          .set('X-Session-Token', failed.body.session_token)
+          .send({ session_id: sessionId });
+        expect(reset.status).toBe(200);
+        expect(reset.body.success).toBe(true);
+        expectNoBookingChanges();
+      } finally {
+        errorLog.mockRestore();
+      }
+    });
+
+    it('clears only the signed session conversation and edit grant while preserving reservations', async () => {
+      await startRecovery();
+      const verified = await send('0801111111');
+      state.conversations.push({ session_id: 'different-conversation', role: 'user', content: 'Keep this' });
+      const response = await request(app).post('/api/chat/reset')
+        .set('X-Session-Token', verified.body.session_token)
+        .send({ session_id: sessionId });
+      expect(response.status).toBe(200);
+      expect(response.body.success).toBe(true);
+      expect(state.conversations).toEqual([{ session_id: 'different-conversation', role: 'user', content: 'Keep this' }]);
+      expectNoBookingChanges();
+      expectUnverified(await startRecovery());
+      expectNoBookingChanges();
     });
   });
 

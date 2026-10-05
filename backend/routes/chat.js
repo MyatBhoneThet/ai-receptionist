@@ -45,8 +45,10 @@ function formatDate(date) {
 
 function normalizeBooking(booking) {
     if (!booking) return booking;
+    // A recovered reservation must not expose the original chat's access ID.
+    const { session_id, ...details } = booking;
     return {
-        ...booking,
+        ...details,
         phone_number: booking.contact_phone ?? booking.phone_number ?? '',
         date: formatDate(booking.date),
         end_date: formatDate(booking.end_date),
@@ -361,6 +363,22 @@ function wantsExistingReservationChange(message) {
     );
 }
 
+function wantsReservationCancellation(message) {
+    return /\bcancel\b.*\b(?:booking|reservation|meeting|stay|dinner|room|table)\b/i.test(message);
+}
+
+function extractLookupPhone(message, today) {
+    const labelled = extractModifyValue('contact_phone', message, today);
+    if (labelled) return labelled;
+    // Numeric dates are corrections, not a reservation's contact number.
+    if (/^(?:\d{1,2}[-/]\d{1,2}[-/]\d{2,4}|\d{4}-\d{2}-\d{2})$/.test(message.trim())) return null;
+    return extractModifyValue('contact_phone', message, today, true);
+}
+
+function redactLookupPhone(message) {
+    return message.replace(/\b(?:phone(?: number)?|telephone|mobile(?: number)?|contact(?: phone| number)?)\s*(?:is|into|to|as|:|=)?\s*(\+?\d[\d ()-]{5,}\d)/ig, '');
+}
+
 function extractLookupDate(message, todayFormatted) {
     const date = extractNaturalBookingDate(message, todayFormatted);
     if (date || hasBookingDateExpression(message)) return date;
@@ -408,9 +426,9 @@ function extractLookupCriteria(message, todayFormatted) {
     const reservation_name = reservationNameMatch ? reservationNameMatch[1].trim().replace(/\s+/g, ' ') : '';
     // Names can contain date/type words (for example May or Friday). Only
     // interpret the surrounding text as the reservation date and service.
-    const detailsText = reservationNameMatch
+    const detailsText = redactLookupPhone(reservationNameMatch
         ? `${text.slice(0, reservationNameMatch.index)} ${text.slice(reservationNameMatch.index + reservationNameMatch[0].length)}`
-        : text;
+        : text);
     const service = resolveBookingService(detailsText);
     const date = extractLookupDate(detailsText, todayFormatted);
 
@@ -425,12 +443,13 @@ function extractLookupCriteria(message, todayFormatted) {
 
 function extractLookupCorrections(message, todayFormatted) {
     const text = normalizeEditValue(message);
+    const detailsText = redactLookupPhone(text);
     const criteria = extractLookupCriteria(text, todayFormatted);
     const updates = {};
     // A follow-up changes only fields present in this message. Do not let an
     // AI reconstruction of the conversation replace established search values.
     if (criteria.date) updates.date = criteria.date;
-    else if (!criteria.reservation_name && hasBookingDateExpression(text)) updates.date = '';
+    else if (!criteria.reservation_name && hasBookingDateExpression(detailsText)) updates.date = '';
     if (criteria.service_type || criteria.service_mentioned) {
         updates.service_type = criteria.service_type;
         updates.service_candidates = criteria.service_candidates;
@@ -461,6 +480,76 @@ async function findBookingForLookup(session_id, criteria) {
     );
 
     return result.rows[0] || null;
+}
+
+async function findRecoveredBooking(criteria, phone) {
+    const result = await query(
+        `SELECT * FROM bookings
+         WHERE status IN ('pending', 'confirmed', 'modified')
+           AND service_type = $1 AND date = $2
+           AND LOWER(reservation_name) = LOWER($3)
+           AND regexp_replace(COALESCE(contact_phone, ''), '[^0-9]', '', 'g') = $4
+         ORDER BY created_at DESC LIMIT 2`,
+        [criteria.service_type, parseDate(criteria.date), criteria.reservation_name, phone.replace(/\D/g, '')]
+    );
+    // Never choose arbitrarily between reservations with the same identifying details.
+    return result.rows.length === 1 ? result.rows[0] : null;
+}
+
+async function respondToBookingLookup({ res, session_id, message, sessionToken, criteria, phone, action = 'modify', selectedBookingId }) {
+    const lookup = getModifyLookupFields(criteria);
+    const intent = action === 'cancel' ? 'cancel_booking' : 'modify_booking';
+    let booking = null;
+    if (lookup.valid) {
+        if (selectedBookingId) {
+            const selected = await query(
+                `SELECT * FROM bookings WHERE id = $1 AND status IN ('pending', 'confirmed', 'modified')`,
+                [selectedBookingId]
+            );
+            booking = selected.rows[0] || null;
+        } else {
+            booking = await findBookingForLookup(session_id, criteria);
+            if (!booking && phone) booking = await findRecoveredBooking(criteria, phone);
+        }
+    }
+
+    let state;
+    let reply;
+    let missing;
+    if (booking) {
+        state = {
+            ...normalizeBooking(booking), modify_mode: 'modify_booking', modify_step: 'choose_field',
+            edit_booking_id: booking.id, lookup_action: action, modify_missing: null,
+        };
+        missing = [];
+        reply = `I've found your ${booking.service_type} reservation for ${state.date} under the name "${booking.reservation_name}". `
+            + (action === 'cancel' ? 'Would you like to proceed with the cancellation?'
+                : 'What would you like to change? You can say date, time, guests, phone number, notes, or name.');
+        if (action !== 'cancel' && wantsReservationSlip(message) && !wantsExistingReservationChange(message)) {
+            reply = booking.people != null
+                ? `Here is your reservation slip for ${booking.reservation_name}. You booked ${booking.people} guests for ${booking.service_type} on ${state.date}.`
+                : `Here is your reservation slip for ${booking.reservation_name}. I have your ${booking.service_type} reservation on ${state.date}, but the guest count was not stored.`;
+        }
+    } else {
+        missing = lookup.valid ? ['phone number'] : lookup.missing;
+        state = {
+            service_type: criteria.service_type || '', service_candidates: criteria.service_candidates || [],
+            date: criteria.date || '', reservation_name: criteria.reservation_name || '',
+            modify_mode: 'modify_booking', lookup_action: action,
+            modify_step: lookup.valid ? 'awaiting_verification' : 'awaiting_lookup', modify_missing: missing,
+        };
+        reply = !lookup.valid ? buildModifyLookupPrompt(missing, state.service_candidates)
+            : phone ? "I couldn't match a reservation with those details and that phone number. Please check the original booking phone number, or correct the date, type, or name."
+                : 'To find a reservation from another conversation, please give the phone number used for the original booking. You can also correct the date, type, or name.';
+    }
+    sessionState.set(session_id, state);
+    await saveConversation(session_id, message, reply);
+    return res.json({
+        intent, message: reply, speak: reply, data: state, missing_fields: missing,
+        confidence: booking ? 1 : 0.9,
+        ...(booking ? action === 'cancel' ? { show_cancel_confirm: true } : { show_reservation_slip: true } : {}),
+        session_token: sessionToken,
+    });
 }
 
 async function loadLatestSessionBooking(session_id) {
@@ -576,94 +665,28 @@ router.post('/', async (req, res) => {
             };
         }
 
-        if (state.modify_step !== 'awaiting_lookup' && (isReservationLookup(normalizedMessage)
+        const lookupPending = ['awaiting_lookup', 'awaiting_verification'].includes(state.modify_step);
+        const cancellation = wantsReservationCancellation(normalizedMessage);
+        if (!lookupPending && (isReservationLookup(normalizedMessage) || cancellation
             || (wantsExistingReservationChange(normalizedMessage) && !state.edit_booking_id))) {
-            const lookupCriteria = extractLookupCriteria(normalizedMessage, today);
-            const hasLookupCriteria = Boolean(
-                lookupCriteria.date || lookupCriteria.service_type || lookupCriteria.reservation_name || lookupCriteria.service_candidates.length
-            );
-            if (wantsReservationSlip(normalizedMessage) && !hasLookupCriteria) {
-                // Let the slip shortcut below show the latest in-session booking.
-            } else {
-            const missingDetails = [];
-            if (!lookupCriteria.date) missingDetails.push('date');
-            if (!lookupCriteria.service_type) missingDetails.push('type of reservation');
-            if (!lookupCriteria.reservation_name) missingDetails.push('reservation name');
-
-            if (missingDetails.length > 0) {
-                const msg = buildModifyLookupPrompt(missingDetails, lookupCriteria.service_candidates);
-                state = {
-                    ...state,
-                    modify_mode: 'modify_booking',
-                    modify_step: 'awaiting_lookup',
-                    ...lookupCriteria,
-                    modify_missing: missingDetails,
-                };
-                sessionState.set(session_id, state);
-                await saveConversation(session_id, message, msg);
-                return res.json({
-                    intent: 'modify_booking',
-                    message: msg,
-                    speak: msg,
-                    data: state,
-                    missing_fields: missingDetails,
-                    confidence: 0.9,
-                    session_token: sessionToken,
-                });
+            const criteria = extractLookupCriteria(normalizedMessage, today);
+            const hasCriteria = Boolean(criteria.date || criteria.service_type || criteria.reservation_name || criteria.service_candidates.length);
+            const matchesSelection = (!criteria.date || parseDate(criteria.date) === parseDate(state.date))
+                && (!criteria.service_type || criteria.service_type === state.service_type)
+                && (!criteria.reservation_name || criteria.reservation_name.toLowerCase() === String(state.reservation_name).toLowerCase())
+                && !criteria.service_candidates.length;
+            if (cancellation && matchesSelection && (state.edit_booking_id || state.id)) {
+                return respondToBookingLookup({ res, session_id, message, sessionToken, criteria: state,
+                    action: 'cancel', selectedBookingId: state.edit_booking_id || state.id });
             }
-
-            const foundBooking = await findBookingForLookup(session_id, lookupCriteria);
-
-            if (foundBooking) {
-                const booking = normalizeBooking(foundBooking);
-                state = {
-                    ...state,
-                    ...booking,
-                    modify_mode: 'modify_booking',
-                    modify_step: 'choose_field',
-                    edit_booking_id: booking.id,
-                    modify_missing: null,
-                };
-                sessionState.set(session_id, state);
-
-                const slipMessage = `Here is your reservation slip for ${booking.reservation_name}.`;
-                await saveConversation(session_id, message, slipMessage);
-                return res.json({
-                    intent: 'modify_booking',
-                    message: slipMessage,
-                    speak: slipMessage,
-                    data: state,
-                    missing_fields: [],
-                    confidence: 1,
-                    show_reservation_slip: true,
-                    session_token: sessionToken,
-                });
-            }
-
-            const msg = `I couldn't find a ${lookupCriteria.service_type} reservation for ${lookupCriteria.date} under the name "${lookupCriteria.reservation_name}". Could you double-check the details?`;
-            state = {
-                ...state,
-                modify_mode: 'modify_booking',
-                modify_step: 'awaiting_lookup',
-                ...lookupCriteria,
-                modify_missing: missingDetails,
-            };
-            sessionState.set(session_id, state);
-            await saveConversation(session_id, message, msg);
-            return res.json({
-                intent: 'modify_booking',
-                message: msg,
-                speak: msg,
-                data: state,
-                missing_fields: missingDetails,
-                confidence: 0.9,
-                session_token: sessionToken,
-            });
+            if (!(wantsReservationSlip(normalizedMessage) && !hasCriteria && !cancellation)) {
+                return respondToBookingLookup({ res, session_id, message, sessionToken, criteria,
+                    phone: extractLookupPhone(normalizedMessage, today), action: cancellation ? 'cancel' : 'modify' });
             }
         }
 
         if (wantsFreshReservation(normalizedMessage)
-            && ((state.modify_step !== 'awaiting_lookup' && state.booking_step !== 'awaiting_service')
+            && ((!lookupPending && state.booking_step !== 'awaiting_service')
                 || /\b(book|reserve|new|another)\b/i.test(normalizedMessage))) {
             state = {
                 reservation_name: '',
@@ -672,7 +695,7 @@ router.post('/', async (req, res) => {
             sessionState.set(session_id, state);
         }
 
-        if (state.modify_step !== 'awaiting_lookup' && wantsReservationSlip(normalizedMessage)
+        if (!lookupPending && wantsReservationSlip(normalizedMessage)
             && !wantsExistingReservationChange(normalizedMessage)) {
             const latestBooking = state.edit_booking_id || state.id
                 ? state
@@ -707,74 +730,13 @@ router.post('/', async (req, res) => {
         }
 
         if (state.modify_mode === 'modify_booking' && state.modify_step) {
-            if (state.modify_step === 'awaiting_lookup') {
-                state = {
-                    ...state,
-                    ...extractLookupCorrections(normalizedMessage, today),
-                    modify_mode: 'modify_booking',
-                    modify_step: 'awaiting_lookup',
-                };
-
-                const lookup = getModifyLookupFields(state);
-                if (!lookup.valid) {
-                    state.modify_missing = lookup.missing;
-                    sessionState.set(session_id, state);
-                    const msg = buildModifyLookupPrompt(lookup.missing, state.service_candidates);
-                    await saveConversation(session_id, message, msg);
-                    return res.json({
-                        intent: 'modify_booking',
-                        message: msg,
-                        speak: msg,
-                        data: state,
-                        missing_fields: lookup.missing,
-                        confidence: 1,
-                        session_token: sessionToken,
-                    });
-                }
-
-                sessionState.set(session_id, state);
-
-                const foundBooking = await findBookingForLookup(session_id, state);
-
-                if (foundBooking) {
-                    const booking = foundBooking;
-                    state = {
-                        ...state,
-                        ...normalizeBooking(booking),
-                        modify_mode: 'modify_booking',
-                        modify_step: 'choose_field',
-                        modify_field: null,
-                        modify_missing: null,
-                        edit_booking_id: booking.id,
-                    };
-                    sessionState.set(session_id, state);
-
-                    const msg = `I've found your ${booking.service_type} reservation for ${state.date} under the name "${booking.reservation_name}". What would you like to change? You can say date, time, guests, phone number, notes, or name.`;
-                    await saveConversation(session_id, message, msg);
-                    return res.json({
-                        intent: 'modify_booking',
-                        message: msg,
-                        speak: msg,
-                        data: state,
-                        missing_fields: [],
-                        confidence: 1,
-                        session_token: sessionToken,
-                    });
-                }
-
-                const msg = `I couldn't find a ${state.service_type} reservation for ${state.date} under the name "${state.reservation_name}". Could you double-check the details?`;
-                state = { ...state, modify_mode: 'modify_booking', modify_step: 'awaiting_lookup' };
-                sessionState.set(session_id, state);
-                await saveConversation(session_id, message, msg);
-                return res.json({
-                    intent: 'modify_booking',
-                    message: msg,
-                    speak: msg,
-                    data: state,
-                    missing_fields: [],
-                    confidence: 1,
-                    session_token: sessionToken,
-                });
+            if (lookupPending) {
+                const phone = extractLookupPhone(normalizedMessage, today);
+                const barePhone = phone && /^\+?[\d ()-]+$/.test(normalizedMessage.trim());
+                const corrections = barePhone ? {} : extractLookupCorrections(normalizedMessage, today);
+                return respondToBookingLookup({ res, session_id, message, sessionToken,
+                    criteria: { ...state, ...corrections }, phone,
+                    action: cancellation ? 'cancel' : state.lookup_action || 'modify' });
             }
 
             const { changes, missing } = extractModifyChanges(normalizedMessage, today, state);
@@ -834,7 +796,7 @@ router.post('/', async (req, res) => {
             const assignments = columns.map((column, index) => `${column} = $${index + 1}`).join(', ');
             const updated = await query(
                 `UPDATE bookings SET ${assignments}, status = CASE WHEN status = 'confirmed' THEN 'modified' ELSE status END, updated_at = NOW()
-                 WHERE id = $${values.length + 1} RETURNING *`,
+                 WHERE id = $${values.length + 1} AND status IN ('pending', 'confirmed', 'modified') RETURNING *`,
                 [...values, editBookingId]
             );
             if (updated.rows.length === 0) {
@@ -1230,139 +1192,12 @@ router.post('/', async (req, res) => {
                 parsed.message = summaryMessage;
                 parsed.speak = summaryMessage;
             }
-        } else if (intent === 'modify_booking') {
-            const check = getModifyLookupFields(data);
-
-            if (!check.valid) {
-                state = {
-                    ...state,
-                    ...data,
-                    modify_mode: 'modify_booking',
-                    modify_step: 'awaiting_lookup',
-                    modify_missing: check.missing,
-                };
-                sessionState.set(session_id, state);
-
-                const missingText = buildModifyLookupPrompt(check.missing);
-                await saveConversation(session_id, message, missingText);
-                return res.json({
-                    ...parsed,
-                    data: state,
-                    message: missingText,
-                    speak: missingText,
-                    missing_fields: check.missing,
-                    confidence: parsed.confidence ?? 1,
-                    session_token: sessionToken,
-                });
-            }
-
-            const parsedDate = parseDate(data.date);
-            const serviceType = data.service_type.toLowerCase().trim();
-            const reservationName = data.reservation_name.toLowerCase().trim();
-
-            const existing = await query(
-                `SELECT * FROM bookings 
-                 WHERE date = $1 
-                 AND service_type = $2 
-                 AND LOWER(reservation_name) = $3
-                 AND status IN ('pending', 'confirmed', 'modified')
-                 ORDER BY created_at DESC LIMIT 1`,
-                [parsedDate, serviceType, reservationName]
-            );
-
-            if (existing.rows.length > 0) {
-                const booking = existing.rows[0];
-                // Update state with booking info BUT allow new data from current turn to override
-                state = {
-                    ...state,
-                    ...normalizeBooking(booking),
-                    ...parsed.data,
-                    modify_mode: 'modify_booking',
-                    modify_step: 'choose_field',
-                    modify_field: null,
-                    modify_missing: null,
-                    edit_booking_id: booking.id,
-                };
-                sessionState.set(session_id, state);
-
-                const msg = `I've found your ${booking.service_type} reservation for ${data.date} under the name "${booking.reservation_name}". What would you like to change? You can say date, time, guests, phone number, notes, or name.`;
-                return res.json({
-                    ...parsed,
-                    message: msg,
-                    speak: msg,
-                    data: state,
-                    session_token: sessionToken,
-                });
-            } else {
-                const msg = `I couldn't find a ${data.service_type} reservation for ${data.date} under the name "${data.reservation_name}". Could you double-check the details?`;
-                return res.json({
-                    ...parsed,
-                    message: msg,
-                    speak: msg,
-                    data: state,
-                    session_token: sessionToken,
-                });
-            }
-        } else if (intent === 'cancel_booking' || intent === 'cancel') {
-            const check = {
-                valid: data.date && data.service_type && data.reservation_name,
-                missing: [
-                    !data.date && 'date',
-                    !data.service_type && 'type of reservation',
-                    !data.reservation_name && 'reservation name',
-                ].filter(Boolean),
-            };
-
-            if (!check.valid) {
-                const missingText = `To find your booking, I'll need a few details: ${check.missing.join(', ')}`;
-                return res.json({
-                    ...parsed,
-                    message: missingText,
-                    speak: missingText,
-                    missing_fields: check.missing,
-                    session_token: sessionToken,
-                });
-            }
-
-            const parsedDate = parseDate(data.date);
-            const serviceType = data.service_type.toLowerCase().trim();
-            const reservationName = data.reservation_name.toLowerCase().trim();
-
-            const existing = await query(
-                `SELECT * FROM bookings 
-                 WHERE date = $1 
-                 AND service_type = $2 
-                 AND LOWER(reservation_name) = $3
-                 AND status IN ('pending', 'confirmed', 'modified')
-                 ORDER BY created_at DESC LIMIT 1`,
-                [parsedDate, serviceType, reservationName]
-            );
-
-            if (existing.rows.length > 0) {
-                const booking = existing.rows[0];
-                // Return found booking data so frontend can show summary
-                state = { ...state, ...normalizeBooking(booking) };
-                sessionState.set(session_id, state);
-
-                const msg = `I've found your ${booking.service_type} reservation for ${data.date} under the name "${booking.reservation_name}". Would you like to proceed with the cancellation?`;
-                return res.json({
-                    ...parsed,
-                    message: msg,
-                    speak: msg,
-                    data: state,
-                    show_cancel_confirm: true, // New flag for frontend
-                    session_token: sessionToken,
-                });
-            } else {
-                const msg = `I'm so sorry, but I couldn't find a ${data.service_type} reservation for ${data.date} under the name "${data.reservation_name}". Could you double-check the details for me?`;
-                return res.json({
-                    ...parsed,
-                    message: msg,
-                    speak: msg,
-                    data: state,
-                    session_token: sessionToken,
-                });
-            }
+        } else if (intent === 'modify_booking' || intent === 'cancel_booking' || intent === 'cancel') {
+            // Model-inferred requests follow the same access and verification rules
+            // as deterministic lookup; model output is never proof of ownership.
+            return respondToBookingLookup({ res, session_id, message, sessionToken, criteria: data,
+                phone: extractLookupPhone(normalizedMessage, today),
+                action: intent === 'modify_booking' ? 'modify' : 'cancel' });
         }
 
         // Add friendly message for waitlist with alternatives
@@ -1399,14 +1234,29 @@ router.post('/', async (req, res) => {
         return res.status(500).json({ 
             error: 'Something went wrong.', 
             details: err.message,
-            stack: process.env.NODE_ENV === 'development' ? err.stack : undefined 
+            stack: process.env.NODE_ENV === 'development' ? err.stack : undefined,
+            session_token: sessionToken,
         });
+    }
+});
+
+// Clear chat context while preserving access to the session's reservations.
+router.post('/reset', requireSessionToken, async (req, res) => {
+    const { session_id } = req.body;
+    if (!session_id) return res.status(400).json({ error: 'session_id is required' });
+    try {
+        await query('DELETE FROM conversations WHERE session_id = $1', [session_id]);
+        sessionState.delete(session_id);
+        return res.json({ success: true });
+    } catch (err) {
+        console.error('[POST /api/chat/reset]', err.message);
+        return res.status(500).json({ error: 'Could not clear the conversation. Please try again.' });
     }
 });
 
 // POST /api/chat/confirm(Finalize the most recent pending booking for this session)
 router.post('/confirm', requireSessionToken, async (req, res) => {
-    const { session_id, action } = req.body;
+    const { session_id, action, booking_id: expectedBookingId } = req.body;
 
     if (!session_id) {
         return res.status(400).json({ error: 'session_id is required' });
@@ -1424,13 +1274,24 @@ router.post('/confirm', requireSessionToken, async (req, res) => {
     }
 
     try {
-        // Find the latest active booking
-        const latest = await query(
-            `SELECT id, status FROM bookings 
-             WHERE session_id = $1 AND status IN ('pending', 'confirmed', 'modified')
-             ORDER BY created_at DESC LIMIT 1`,
-            [session_id]
-        );
+        // Selection is assigned only after an authorized lookup, and is never
+        // accepted from request JSON. Recovery keeps the booking's original session.
+        const currentState = sessionState.get(session_id);
+        if (['awaiting_lookup', 'awaiting_verification'].includes(currentState?.modify_step)) {
+            return res.json({ success: false, message: 'Please find and verify the reservation first.', session_token: sessionToken });
+        }
+        const selectedId = currentState?.edit_booking_id;
+        const latest = selectedId
+            ? await query(
+                `SELECT * FROM bookings WHERE id = $1 AND status IN ('pending', 'confirmed', 'modified')`,
+                [selectedId]
+            )
+            : await query(
+                `SELECT id, status FROM bookings
+                 WHERE session_id = $1 AND status IN ('pending', 'confirmed', 'modified')
+                 ORDER BY created_at DESC LIMIT 1`,
+                [session_id]
+            );
 
         if (latest.rows.length === 0) {
             return res.json({ success: false, message: 'No active booking found.', session_token: sessionToken });
@@ -1438,6 +1299,11 @@ router.post('/confirm', requireSessionToken, async (req, res) => {
 
         const bookingId = latest.rows[0].id;
         const currentStatus = latest.rows[0].status;
+        // The displayed reservation must agree with the authorized server
+        // selection, including after a restart or a change from another tab.
+        if (expectedBookingId != null && String(expectedBookingId) !== String(bookingId)) {
+            return res.json({ success: false, message: 'The reservation selection has expired. Please find the reservation again.', session_token: sessionToken });
+        }
 
         // Determine target status
         let targetStatus = 'confirmed';
@@ -1515,7 +1381,8 @@ router.post('/confirm', requireSessionToken, async (req, res) => {
             // We still consider the booking confirmed in our DB even if calendar fails
         }
 
-        state = { ...state, ...normalizeBooking(confirmedBooking), calendar_sync: calendarSync };
+        state = confirmedBooking.status === 'cancelled' ? {}
+            : { ...state, ...normalizeBooking(confirmedBooking), calendar_sync: calendarSync };
         sessionState.set(session_id, state);
 
         return res.json({
