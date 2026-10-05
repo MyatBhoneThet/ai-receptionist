@@ -33,6 +33,12 @@ const ICONS: Record<string, string> = {
     meeting: '🤝',
 };
 
+const SERVICE_LABELS: Record<string, string> = {
+    restaurant: 'Restaurant',
+    hotel: 'Hotel room',
+    meeting: 'Meeting',
+};
+
 type SummaryField = {
     key: string;
     label: string;
@@ -80,8 +86,15 @@ const SLIP_FIELDS: SummaryField[] = [
     { key: 'updated_at', label: 'Updated', placeholder: 'Not recorded' },
 ];
 
+const SEARCH_FIELDS: SummaryField[] = [
+    { key: 'service_type', label: 'Reservation Type', placeholder: 'Hotel, restaurant, or meeting?' },
+    { key: 'date', label: 'Date', placeholder: 'Which date?' },
+    { key: 'reservation_name', label: 'Reservation Name', placeholder: 'Whose reservation?' },
+];
+
 function formatSummaryValue(key: string, value: unknown) {
     if (value === null || value === undefined || value === '') return '';
+    if (key === 'service_type') return SERVICE_LABELS[String(value)] || String(value);
     if (key === 'date' || key === 'end_date') {
         if (typeof value === 'string') {
             const isoMatch = value.match(/^(\d{4})-(\d{2})-(\d{2})/);
@@ -112,12 +125,17 @@ function formatSummaryValue(key: string, value: unknown) {
 
 export default function BookingSummary({ data, missing_fields = [], intent, confidence, sessionId, sessionToken, availability: availabilityProp, onSuggestDate }: BookingSummaryProps) {
     const [availability, setAvailability] = React.useState<AvailabilityResponse | null>(availabilityProp || null);
-    const slipMode = intent === 'reservation_slip' || intent === 'modify_booking' || intent === 'cancel_booking';
+    const reservationIntent = ['reservation_slip', 'modify_booking', 'cancel_booking', 'cancel'].includes(intent || '');
+    const searchMode = reservationIntent && (data?.modify_step === 'awaiting_lookup' || !(data?.id || data?.edit_booking_id));
+    const slipMode = reservationIntent && !searchMode;
 
     React.useEffect(() => {
         let mounted = true;
         async function fetchAvailability() {
-            if (!data?.service_type || !data?.date) return;
+            if (searchMode || !data?.service_type || !data?.date) {
+                setAvailability(null);
+                return;
+            }
             if (availabilityProp) {
                 setAvailability(availabilityProp as any);
                 return;
@@ -142,12 +160,12 @@ export default function BookingSummary({ data, missing_fields = [], intent, conf
         }
         fetchAvailability();
         return () => { mounted = false; };
-    }, [data?.service_type, data?.date, sessionId, sessionToken, availabilityProp]);
+    }, [data?.service_type, data?.date, data?.end_date, data?.start_time, data?.end_time, data?.people, data?.id, data?.preferred_inventory, searchMode, sessionId, sessionToken, availabilityProp]);
 
     const bookable = ['book_restaurant', 'book_hotel', 'book_meeting'];
-    if (!data || !intent || (!bookable.includes(intent) && !slipMode)) return null;
+    if (!data || !intent || (!bookable.includes(intent) && !reservationIntent)) return null;
 
-    const requiredFields = slipMode ? SLIP_FIELDS : (REQUIRED_FIELDS[intent] || []);
+    const requiredFields = searchMode ? SEARCH_FIELDS : slipMode ? SLIP_FIELDS : (REQUIRED_FIELDS[intent] || []);
     const icon = ICONS[data.service_type as string] || '📋';
     const pct = Math.round((confidence || 0) * 100);
 
@@ -163,13 +181,18 @@ export default function BookingSummary({ data, missing_fields = [], intent, conf
                         <h2 className="text-xl font-light text-ink serif lowercase">
                             {slipMode
                                 ? 'reservation slip'
-                                : (data.service_type ? (data.service_type as string) : 'reservation')}
+                                : searchMode ? 'reservation search'
+                                : (data.service_type ? SERVICE_LABELS[data.service_type] || data.service_type : 'reservation')}
                         </h2>
                         <span className="text-[9px] font-bold text-gold uppercase tracking-[0.2em] leading-none">Concierge Summary</span>
                     </div>
                 </div>
 
-                <div className="space-y-2">
+                {searchMode ? (
+                    <p className="text-xs leading-relaxed text-ink/60">
+                        No reservation selected yet. These are the details being used to find it.
+                    </p>
+                ) : <div className="space-y-2">
                     <div className="flex justify-between text-[9px] font-bold uppercase tracking-widest leading-none">
                         <span className="text-ink/30">System Confidence</span>
                         <span className="text-gold">{pct}%</span>
@@ -180,7 +203,7 @@ export default function BookingSummary({ data, missing_fields = [], intent, conf
                             style={{ width: `${pct}%` }}
                         />
                     </div>
-                </div>
+                </div>}
             </div>
 
             {/* Fields List */}
@@ -188,10 +211,10 @@ export default function BookingSummary({ data, missing_fields = [], intent, conf
                 <div>
                     <div className="mb-3 flex items-center justify-between">
                         <p className="text-[9px] font-bold uppercase tracking-[0.28em] text-ink/40">
-                            {slipMode ? 'Reservation Slip' : 'Fill-in-the-blank form'}
+                            {searchMode ? 'Search criteria' : slipMode ? 'Reservation Slip' : 'Fill-in-the-blank form'}
                         </p>
                         <span className="text-[9px] font-bold uppercase tracking-[0.2em] text-gold">
-                            {slipMode ? 'Saved details' : `${requiredFields.filter((field) => !data[field.key]).length} blanks left`}
+                            {searchMode ? 'Unverified' : slipMode ? 'Saved details' : `${requiredFields.filter((field) => !data[field.key]).length} blanks left`}
                         </span>
                     </div>
 
@@ -224,7 +247,7 @@ export default function BookingSummary({ data, missing_fields = [], intent, conf
                     </div>
                 </div>
 
-                {data.preferences && Object.keys(data.preferences).length > 0 && (
+                {!searchMode && data.preferences && Object.keys(data.preferences).length > 0 && (
                     <div className="mt-3 rounded-xl border border-parchment p-4 bg-parchment/40">
                         <p className="text-[9px] font-bold uppercase tracking-widest text-ink/40 mb-2">Preferences</p>
                         <ul className="space-y-1">
@@ -237,7 +260,7 @@ export default function BookingSummary({ data, missing_fields = [], intent, conf
                     </div>
                 )}
 
-                {availability && (
+                {!searchMode && availability && (
                     <div className="mt-3 rounded-xl border border-ink/10 p-4 bg-white flex items-center justify-between">
                         <div>
                             <p className="text-[9px] uppercase tracking-widest text-ink/40 font-bold">Availability</p>
@@ -258,7 +281,7 @@ export default function BookingSummary({ data, missing_fields = [], intent, conf
                     </div>
                 )}
 
-                {availability?.waitlist && availability?.alternative && (() => {
+                {!searchMode && availability?.waitlist && availability?.alternative && (() => {
                     const alternative = availability.alternative;
                     return (
                     <div className="mt-2 rounded-xl border border-amber-100 bg-amber-50 p-3 space-y-2">
@@ -299,7 +322,7 @@ export default function BookingSummary({ data, missing_fields = [], intent, conf
                     <div className="flex flex-col">
                         <span className="text-[9px] font-bold text-white/40 uppercase tracking-widest leading-none mb-1">Status</span>
                         <span className="text-[11px] font-bold text-white uppercase tracking-tighter">
-                            {slipMode ? 'Reservation Slip' : 'Drafting Request'}
+                            {searchMode ? 'No reservation selected' : slipMode ? 'Reservation Slip' : 'Drafting Request'}
                         </span>
                     </div>
                     <div className="h-2 w-2 rounded-full bg-gold animate-pulse shadow-[0_0_8px_rgba(201,169,110,0.5)]" />

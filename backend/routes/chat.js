@@ -9,6 +9,7 @@ import { notifyBooking } from '../services/notifications.js';
 import { findUserByEmail, verifyAccessToken } from '../services/auth.js';
 import { checkAvailability, findAlternativeAvailability, findDuplicateBooking } from '../services/availability.js';
 import { formatDisplayDateValue } from '../services/dateOnly.js';
+import { resolveBookingService, hasBookingServiceExpression } from '../services/bookingService.js';
 import {
     calendarToday, bookingDateKey, addBookingDays,
     bookingStayDays, extractNaturalBookingDate, hasBookingDateExpression,
@@ -193,11 +194,12 @@ function buildAlternativeMessage(data) {
 }
 
 function getModifyLookupFields(data) {
+    const validType = ['hotel', 'restaurant', 'meeting'].includes(data.service_type);
     return {
-        valid: bookingDateKey(data.date) && data.service_type && data.reservation_name,
+        valid: bookingDateKey(data.date) && validType && data.reservation_name,
         missing: [
             !bookingDateKey(data.date) && 'date',
-            !data.service_type && 'type of reservation',
+            !validType && 'type of reservation',
             !data.reservation_name && 'reservation name',
         ].filter(Boolean),
     };
@@ -316,8 +318,10 @@ function buildModifyPrompt(field) {
     }
 }
 
-function buildModifyLookupPrompt(missingFields) {
-    return `To find your booking, I'll need a few details: ${missingFields.join(', ')}`;
+function buildModifyLookupPrompt(missingFields, candidates = []) {
+    if (candidates.length > 1) return `Which reservation type do you mean: ${candidates.join(' or ')}?`;
+    const typeHint = missingFields.includes('type of reservation') ? ' The type can be hotel, restaurant, or meeting.' : '';
+    return `To find your booking, I'll need a few details: ${missingFields.join(', ')}.${typeHint}`;
 }
 
 function wantsReservationSlip(message) {
@@ -333,7 +337,7 @@ function wantsReservationSlip(message) {
 function wantsFreshReservation(message) {
     const text = normalizeEditValue(message).toLowerCase();
     const hasBookingCue = /\b(book|reserve|reservation|booking|table|dinner|lunch|breakfast|room|meeting)\b/.test(text);
-    const hasModifyCue = /\b(change|modify|update|edit|cancel|slip|show|view|my booking)\b/.test(text);
+    const hasModifyCue = /\b(change|modify|update|edit|alter|amend|reschedule|cancel|slip|show|view|my booking)\b/.test(text);
     return hasBookingCue && !hasModifyCue;
 }
 
@@ -352,17 +356,9 @@ function isReservationLookup(message) {
 function wantsExistingReservationChange(message) {
     const text = normalizeEditValue(message).toLowerCase();
     return (
-        /\b(change|modify|update|edit)\b/.test(text) &&
-        /\b(my|existing|already|reserved|booked)?\s*(booking|reservation)\b/.test(text)
+        /\b(change|modify|update|edit|alter|amend|reschedule)\b/.test(text) &&
+        /\b(my|existing|already|reserved|booked)?\s*(booking|reservation|meeting|stay|dinner|room|table)\b/.test(text)
     );
-}
-
-function inferServiceTypeFromMessage(text) {
-    const value = normalizeEditValue(text).toLowerCase();
-    if (/\b(dinner|lunch|breakfast|table|restaurant|dining)\b/.test(value)) return 'restaurant';
-    if (/\b(hotel|room|suite|stay)\b/.test(value)) return 'hotel';
-    if (/\b(meeting|boardroom|conference|meeting room)\b/.test(value)) return 'meeting';
-    return '';
 }
 
 function extractLookupDate(message, todayFormatted) {
@@ -415,11 +411,13 @@ function extractLookupCriteria(message, todayFormatted) {
     const detailsText = reservationNameMatch
         ? `${text.slice(0, reservationNameMatch.index)} ${text.slice(reservationNameMatch.index + reservationNameMatch[0].length)}`
         : text;
-    const service_type = inferServiceTypeFromMessage(detailsText);
+    const service = resolveBookingService(detailsText);
     const date = extractLookupDate(detailsText, todayFormatted);
 
     return {
-        service_type,
+        service_type: service.service_type,
+        service_candidates: service.ambiguous ? service.candidates : [],
+        service_mentioned: hasBookingServiceExpression(detailsText),
         date,
         reservation_name,
     };
@@ -433,7 +431,10 @@ function extractLookupCorrections(message, todayFormatted) {
     // AI reconstruction of the conversation replace established search values.
     if (criteria.date) updates.date = criteria.date;
     else if (!criteria.reservation_name && hasBookingDateExpression(text)) updates.date = '';
-    if (criteria.service_type) updates.service_type = criteria.service_type;
+    if (criteria.service_type || criteria.service_mentioned) {
+        updates.service_type = criteria.service_type;
+        updates.service_candidates = criteria.service_candidates;
+    }
     if (criteria.reservation_name) updates.reservation_name = criteria.reservation_name;
 
     const bareName = text.replace(/^(?:actually[,:]?|it(?:'s| is)|my name is|the name is)\s+/i, '').replace(/[.!]$/, '').trim();
@@ -579,7 +580,7 @@ router.post('/', async (req, res) => {
             || (wantsExistingReservationChange(normalizedMessage) && !state.edit_booking_id))) {
             const lookupCriteria = extractLookupCriteria(normalizedMessage, today);
             const hasLookupCriteria = Boolean(
-                lookupCriteria.date || lookupCriteria.service_type || lookupCriteria.reservation_name
+                lookupCriteria.date || lookupCriteria.service_type || lookupCriteria.reservation_name || lookupCriteria.service_candidates.length
             );
             if (wantsReservationSlip(normalizedMessage) && !hasLookupCriteria) {
                 // Let the slip shortcut below show the latest in-session booking.
@@ -590,7 +591,7 @@ router.post('/', async (req, res) => {
             if (!lookupCriteria.reservation_name) missingDetails.push('reservation name');
 
             if (missingDetails.length > 0) {
-                const msg = `To find your booking, I'll need a few details: ${missingDetails.join(', ')}`;
+                const msg = buildModifyLookupPrompt(missingDetails, lookupCriteria.service_candidates);
                 state = {
                     ...state,
                     modify_mode: 'modify_booking',
@@ -662,7 +663,8 @@ router.post('/', async (req, res) => {
         }
 
         if (wantsFreshReservation(normalizedMessage)
-            && (state.modify_step !== 'awaiting_lookup' || /\b(book|reserve|new|another)\b/i.test(normalizedMessage))) {
+            && ((state.modify_step !== 'awaiting_lookup' && state.booking_step !== 'awaiting_service')
+                || /\b(book|reserve|new|another)\b/i.test(normalizedMessage))) {
             state = {
                 reservation_name: '',
                 phone_number: state.phone_number || '',
@@ -717,7 +719,7 @@ router.post('/', async (req, res) => {
                 if (!lookup.valid) {
                     state.modify_missing = lookup.missing;
                     sessionState.set(session_id, state);
-                    const msg = buildModifyLookupPrompt(lookup.missing);
+                    const msg = buildModifyLookupPrompt(lookup.missing, state.service_candidates);
                     await saveConversation(session_id, message, msg);
                     return res.json({
                         intent: 'modify_booking',
@@ -890,6 +892,45 @@ router.post('/', async (req, res) => {
 
         const validation = validateBookingResponse(llmResponse);
         const parsed = validation.data;
+
+        const requestedService = resolveBookingService(normalizedMessage);
+        if (requestedService.service_type || requestedService.ambiguous) {
+            parsed.data.service_type = requestedService.service_type;
+            parsed.data.service_candidates = requestedService.ambiguous ? requestedService.candidates : [];
+        }
+        const creatingBooking = ['book_hotel', 'book_restaurant', 'book_meeting', 'new_booking'].includes(parsed.intent)
+            || state.booking_step === 'awaiting_service'
+            || (wantsFreshReservation(normalizedMessage) && /\b(book|reserve)\b/i.test(normalizedMessage));
+        if (creatingBooking && requestedService.ambiguous) {
+            const lookupDetails = extractLookupCriteria(normalizedMessage, today);
+            state = {
+                ...state, ...parsed.data,
+                date: lookupDetails.date || state.date || parsed.data.date,
+                reservation_name: lookupDetails.reservation_name || state.reservation_name || parsed.data.reservation_name,
+                service_type: '', service_candidates: requestedService.candidates,
+                booking_step: 'awaiting_service',
+            };
+            sessionState.set(session_id, state);
+            const msg = buildModifyLookupPrompt(['type of reservation'], requestedService.candidates);
+            await saveConversation(session_id, message, msg);
+            return res.json({
+                intent: 'new_booking', message: msg, speak: msg, data: state,
+                missing_fields: ['type of reservation'], confidence: 1, session_token: sessionToken,
+            });
+        }
+        if (creatingBooking) {
+            const intentService = parsed.intent.replace(/^book_/, '');
+            const service = requestedService.service_type
+                || (['hotel', 'restaurant', 'meeting'].includes(state.service_type) ? state.service_type : '')
+                || (['hotel', 'restaurant', 'meeting'].includes(intentService) ? intentService : '');
+            if (service) {
+                if (state.booking_step === 'awaiting_service') parsed.data = { ...parsed.data, ...state };
+                parsed.data.service_type = service;
+                parsed.intent = `book_${service}`;
+                parsed.data.booking_step = null;
+                parsed.data.service_candidates = [];
+            }
+        }
 
         if (inventoryPreference) {
             parsed.data.preferred_inventory = inventoryPreference;

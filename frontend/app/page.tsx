@@ -89,7 +89,9 @@ export default function Page() {
             // attach availability to data for UI
             const mergedData = response.data ? { ...response.data, availability: response.availability } : response.data;
             setCurrentData(mergedData);
-            setCurrentIntent(response.show_reservation_slip ? 'reservation_slip' : response.intent);
+            const hasReservation = Boolean(response.data?.id || response.data?.edit_booking_id)
+                && response.data?.modify_step !== 'awaiting_lookup';
+            setCurrentIntent(response.show_reservation_slip && hasReservation ? 'reservation_slip' : response.intent);
             setMissingFields(response.missing_fields || []);
             setConfidence(response.confidence);
 

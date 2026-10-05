@@ -1292,6 +1292,228 @@ const runRoutes = process.env.NO_LISTEN !== 'true';
     });
   });
 
+  describe('reservation type understanding', () => {
+    let fixtureNumber = 0;
+    let sessionId;
+    let originalBookings;
+    const originalTimezone = process.env.CALENDAR_TIMEZONE;
+
+    beforeEach(() => {
+      process.env.CALENDAR_TIMEZONE = 'Asia/Bangkok';
+      jest.useFakeTimers({
+        now: new Date('2026-10-05T07:00:00Z'),
+        doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'hrtime', 'performance', 'queueMicrotask'],
+      });
+      sessionId = `sess-service-understanding-${++fixtureNumber}`;
+      state.bookings.push({
+        id: 80,
+        session_id: sessionId,
+        service_type: 'meeting',
+        date: '2026-10-14',
+        start_time: '10:00:00',
+        end_time: '11:00:00',
+        reservation_name: 'Steward',
+        people: 6,
+        notes: '',
+        status: 'confirmed',
+        waitlisted: false,
+        contact_phone: '0801111111',
+        google_event_id: 'existing-meeting-event',
+        created_at: new Date('2026-10-01T00:00:00Z'),
+        updated_at: new Date('2026-10-01T00:00:00Z'),
+      });
+      originalBookings = state.bookings.map(cloneRow);
+      query.mockClear();
+      // An incorrect model reconstruction must not override explicit user criteria.
+      mockChat.mockResolvedValue({
+        ...defaultChatResponse,
+        intent: 'book_restaurant',
+        data: { service_type: 'restaurant', date: '12-10-2026', reservation_name: 'Stuart', people: 2 },
+      });
+    });
+
+    afterEach(() => {
+      jest.useRealTimers();
+      if (originalTimezone === undefined) delete process.env.CALENDAR_TIMEZONE;
+      else process.env.CALENDAR_TIMEZONE = originalTimezone;
+    });
+
+    async function send(message) {
+      const response = await request(app).post('/api/chat').send({ session_id: sessionId, message });
+      expect(response.status).toBe(200);
+      return response;
+    }
+
+    function expectNoBookingChanges() {
+      expect(state.bookings).toEqual(originalBookings);
+      expect(mockUpsertEvent).not.toHaveBeenCalled();
+      expect(query.mock.calls.filter(([sql]) =>
+        /^(?:insert into|update|delete from) bookings\b/.test(normalizeSql(sql))
+      )).toEqual([]);
+    }
+
+    function expectMeetingFound(response) {
+      expect(response.body.intent).toBe('modify_booking');
+      expect(response.body.data).toEqual(expect.objectContaining({
+        service_type: 'meeting', date: '14-10-2026', reservation_name: 'Steward',
+        edit_booking_id: 80, modify_step: 'choose_field',
+      }));
+      expect(mockChat).not.toHaveBeenCalled();
+      expectNoBookingChanges();
+    }
+
+    it.each(['alter', 'amend'])(
+      'starts an existing-reservation lookup for "%s a booking" without asking the model',
+      async (verb) => {
+        const response = await send(`I would like to ${verb} a booking`);
+        expect(response.body.intent).toBe('modify_booking');
+        expect(response.body.data.modify_step).toBe('awaiting_lookup');
+        expect(response.body.missing_fields).toEqual(['date', 'type of reservation', 'reservation name']);
+        expect(mockChat).not.toHaveBeenCalled();
+        expectNoBookingChanges();
+      }
+    );
+
+    it('uses the explicitly stated meeting type in the screenshot sentence, despite the word table', async () => {
+      await send('I would like to alter a booking');
+      const response = await send('The date is next Wednesday and the table reservation is meeting and the name is Steward');
+      expectMeetingFound(response);
+    });
+
+    it.each(['meeting room', 'conference room', 'boardroom'])(
+      'recognizes a %s reservation as a meeting rather than a hotel stay',
+      async (service) => {
+        const response = await send(`Find my ${service} reservation on 14-10-2026 under the name Steward`);
+        expectMeetingFound(response);
+      }
+    );
+
+    it.each([
+      'the type of reservation is meeting, not booking',
+      'meeting, not restaurant',
+      'meeting, not a restaurant',
+      'not restaurant, meeting',
+    ])('corrects only the type with "%s" while keeping the date and name', async (correction) => {
+      const failed = await send('I want to change my restaurant reservation on 14-10-2026 under the name Steward');
+      expect(failed.body.data).toEqual(expect.objectContaining({
+        service_type: 'restaurant', date: '14-10-2026', reservation_name: 'Steward',
+        modify_step: 'awaiting_lookup',
+      }));
+      expect(failed.body.data.edit_booking_id).toBeUndefined();
+      const response = await send(correction);
+      expectMeetingFound(response);
+    });
+
+    it('respects an explicit restaurant label when meeting is only incidental context', async () => {
+      const restaurant = { ...state.bookings.find((booking) => booking.id === 80), id: 81, service_type: 'restaurant' };
+      state.bookings.push(restaurant);
+      originalBookings = state.bookings.map(cloneRow);
+      const response = await send('I want to amend my booking on 14-10-2026 and the reservation type is restaurant for a meeting with colleagues and the name is Steward');
+      expect(response.body.data).toEqual(expect.objectContaining({
+        service_type: 'restaurant', date: '14-10-2026', reservation_name: 'Steward',
+        edit_booking_id: 81, modify_step: 'choose_field',
+      }));
+      expect(mockChat).not.toHaveBeenCalled();
+      expectNoBookingChanges();
+    });
+
+    it('asks for clarification when unlabelled reservation types conflict instead of choosing one', async () => {
+      const response = await send('I want to alter my hotel or restaurant reservation on 14-10-2026 under the name Steward');
+      expect(response.body.intent).toBe('modify_booking');
+      expect(response.body.missing_fields).toEqual(['type of reservation']);
+      expect(response.body.data).toEqual(expect.objectContaining({
+        service_type: '', date: '14-10-2026', reservation_name: 'Steward', modify_step: 'awaiting_lookup',
+      }));
+      expect(response.body.data.edit_booking_id).toBeUndefined();
+      expect(mockChat).not.toHaveBeenCalled();
+      expectNoBookingChanges();
+      expectMeetingFound(await send('meeting'));
+    });
+
+    it('does not silently retain the previous type when a follow-up introduces conflicting types', async () => {
+      await send('I want to change my restaurant reservation on 14-10-2026 under the name Steward');
+      const response = await send('hotel or restaurant');
+      expect(response.body.missing_fields).toEqual(['type of reservation']);
+      expect(response.body.data).toEqual(expect.objectContaining({
+        service_type: '', date: '14-10-2026', reservation_name: 'Steward', modify_step: 'awaiting_lookup',
+      }));
+      expect(response.body.data.edit_booking_id).toBeUndefined();
+      expect(mockChat).not.toHaveBeenCalled();
+      expectNoBookingChanges();
+      expectMeetingFound(await send('meeting'));
+    });
+  });
+
+  describe('new booking reservation types', () => {
+    let fixtureNumber = 0;
+    let sessionId;
+    let originalBookings;
+
+    beforeEach(() => {
+      sessionId = `sess-new-service-${++fixtureNumber}`;
+      originalBookings = state.bookings.map(cloneRow);
+      query.mockClear();
+      mockChat.mockResolvedValue({
+        ...defaultChatResponse,
+        intent: 'book_restaurant',
+        data: {
+          service_type: 'restaurant', date: '14-10-2026', reservation_name: 'Kai',
+          start_time: '', end_time: '', people: null, phone_number: '',
+        },
+      });
+    });
+
+    async function send(message) {
+      const response = await request(app).post('/api/chat').send({ session_id: sessionId, message });
+      expect(response.status).toBe(200);
+      return response;
+    }
+
+    function expectNoBookingChanges() {
+      expect(state.bookings).toEqual(originalBookings);
+      expect(mockUpsertEvent).not.toHaveBeenCalled();
+      expect(query.mock.calls.filter(([sql]) =>
+        /^(?:insert into|update|delete from) bookings\b/.test(normalizeSql(sql))
+      )).toEqual([]);
+    }
+
+    it('keeps an explicit new meeting-room request as a meeting when the model incorrectly chooses restaurant', async () => {
+      const response = await send('Book a meeting room on 14-10-2026 under the name Kai');
+      expect(response.body.intent).toBe('book_meeting');
+      expect(response.body.data).toEqual(expect.objectContaining({
+        service_type: 'meeting', date: '14-10-2026', reservation_name: 'Kai',
+      }));
+      expect(response.body.missing_fields).toContain('start_time');
+      expectNoBookingChanges();
+    });
+
+    it('asks for a reservation type before saving a new request with conflicting types', async () => {
+      const response = await send('Book hotel or restaurant on 14-10-2026 under the name Kai');
+      expect(response.body.missing_fields).toEqual(['type of reservation']);
+      expect(response.body.data).toEqual(expect.objectContaining({
+        service_type: '', booking_step: 'awaiting_service', service_candidates: ['hotel', 'restaurant'],
+        date: '14-10-2026', reservation_name: 'Kai',
+      }));
+      expectNoBookingChanges();
+    });
+
+    it('accepts a bare meeting clarification without losing the saved new-booking date and name', async () => {
+      await send('Book hotel or restaurant on 14-10-2026 under the name Kai');
+      mockChat.mockResolvedValue({
+        ...defaultChatResponse,
+        intent: 'book_restaurant',
+        data: { service_type: 'restaurant', date: '12-10-2026', reservation_name: 'Stuart' },
+      });
+      const response = await send('meeting');
+      expect(response.body.intent).toBe('book_meeting');
+      expect(response.body.data).toEqual(expect.objectContaining({
+        service_type: 'meeting', date: '14-10-2026', reservation_name: 'Kai',
+      }));
+      expect(response.body.data.booking_step).not.toBe('awaiting_service');
+      expectNoBookingChanges();
+    });
+  });
+
   describe('plain-English booking changes', () => {
     let fixtureNumber = 0;
     let sessionId;

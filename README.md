@@ -18,6 +18,7 @@ An intelligent Hotel & Restaurant Receptionist powered by AI, designed to handle
   - 🏨 **Hotel**: Manage check-ins, check-outs, and room reservations.
   - 🤝 **Meetings**: Schedule meeting rooms and locations.
 - **Booking Changes**: Accepts dates such as “day after tomorrow” or “seventh October this year”, including guest and phone changes in the same message.
+- **Reservation Types**: Explicit hotel, restaurant, and meeting types take priority over incidental room/table words. Corrections preserve other details, and conflicting types prompt clarification. Search criteria are shown separately from a saved reservation.
 - **Google Calendar Sync**: Updates the existing Calendar event when a booking changes and reports whether synchronization succeeded.
 - **Speech Capabilities**: Stops listening after an utterance and places the transcript in the editable input. The responsive speech sphere stays above the input while listening.
 - **Database Persistence**: Reliable storage of conversations and bookings using PostgreSQL (Neon DB).
