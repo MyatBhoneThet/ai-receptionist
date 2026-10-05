@@ -13,6 +13,7 @@ export const BookingResponseSchema = z.object({
         'cancel_booking',
         'new_booking',
         'greeting',
+        'farewell',
         'unknown',
     ]).default('unknown'),
 

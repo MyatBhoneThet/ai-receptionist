@@ -10,6 +10,7 @@ import { findUserByEmail, verifyAccessToken } from '../services/auth.js';
 import { checkAvailability, findAlternativeAvailability, findDuplicateBooking } from '../services/availability.js';
 import { formatDisplayDateValue } from '../services/dateOnly.js';
 import { resolveBookingService, hasBookingServiceExpression } from '../services/bookingService.js';
+import { validateBookingAlteration } from '../services/bookingAlteration.js';
 import {
     calendarToday, bookingDateKey, addBookingDays,
     bookingStayDays, extractNaturalBookingDate, hasBookingDateExpression,
@@ -197,12 +198,13 @@ function buildAlternativeMessage(data) {
 
 function getModifyLookupFields(data) {
     const validType = ['hotel', 'restaurant', 'meeting'].includes(data.service_type);
+    const validDate = !data.date_invalid && (!data.date || bookingDateKey(data.date));
     return {
-        valid: bookingDateKey(data.date) && validType && data.reservation_name,
+        valid: validDate && validType && data.reservation_name,
         missing: [
-            !bookingDateKey(data.date) && 'date',
             !validType && 'type of reservation',
             !data.reservation_name && 'reservation name',
+            !validDate && 'date',
         ].filter(Boolean),
     };
 }
@@ -222,6 +224,7 @@ function detectModifyField(message) {
     const text = normalizeEditValue(message).toLowerCase();
     if (!text) return null;
     if (/\b(check[ -]?out|departure)\b/.test(text)) return 'end_date';
+    if (/\b(?:end|finish|ending|finishing) time\b/.test(text)) return 'end_time';
     if (hasBookingDateExpression(text) || /\bday\b/.test(text)) return 'date';
     if (/\b(time|schedule|hour|hours)\b/.test(text)) return 'start_time';
     if (/\b(phone|telephone|mobile|contact number)\b/.test(text)) return 'contact_phone';
@@ -231,19 +234,39 @@ function detectModifyField(message) {
     return null;
 }
 
+function extractTextEditSpan(field, message) {
+    const label = field === 'reservation_name' ? '(?:reservation |guest )?name' : '(?:notes?|special requests?)';
+    const nextField = '(?:date|check[ -]?in|check[ -]?out|start time|end time|time|guests?|people|phone|contact|reservation name|name|notes?)';
+    return message.match(new RegExp(`\\b${label}\\s+(?:(?:is|to|as)\\s+)?(.+?)(?=\\s+(?:and|with)\\s+(?:(?:change|update|set)\\s+(?:the\\s+)?)?${nextField}\\b|[.!?]|$)`, 'i'));
+}
+
 function extractModifyValue(field, message, today, allowBare = false) {
     const text = normalizeEditValue(message);
     if (!text) return null;
     if (field === 'date' || field === 'end_date') return extractNaturalBookingDate(text, today) || null;
-    if (field === 'start_time') {
-        // Keep HH:MM workflows and accept the common spoken form "9pm".
-        const clock = text.match(/\b(\d{1,2})(?::(\d{2}))(?::\d{2})?\s*(am|pm)?\b/i)
-            || text.match(/\b(\d{1,2})\s*(am|pm)\b/i);
+    if (field === 'start_time' || field === 'end_time') {
+        const explicitClock = '(?:\\d{1,2}:\\d{2}(?::\\d{2})?\\s*(?:am|pm)?|\\d{1,2}\\s*(?:am|pm))';
+        const range = text.match(new RegExp(`\\b(${explicitClock})\\s*(?:to|until|[-–])\\s*(${explicitClock})\\b`, 'i'));
+        const endLabel = /\b(?:end|finish|ending|finishing) time\b/i;
+        let clockText = range?.[field === 'start_time' ? 1 : 2];
+        if (!clockText) {
+            const ending = text.match(endLabel);
+            const timingText = field === 'end_time' ? ending ? text.slice(ending.index + ending[0].length) : allowBare ? text : ''
+                : ending ? text.slice(0, ending.index) : text;
+            clockText = timingText.match(new RegExp(`\\b${explicitClock}\\b`, 'i'))?.[0];
+            if (!clockText) {
+                const labelled = timingText.match(/\b(?:start(?:ing)?(?: time)?|time)\s*(?:is|to|at|from|:)?\s*(\d{1,2})(?![\d:/-])/i);
+                clockText = labelled?.[1] || (allowBare && /^\d{1,2}$/.test(timingText.trim()) ? timingText.trim() : null)
+                    || (field === 'end_time' && /^\s*(?:is|to|at|:)?\s*\d{1,2}\s*$/i.test(timingText)
+                        ? timingText.match(/\d{1,2}/)?.[0] : null);
+            }
+        }
+        if (!clockText) return null;
+        const clock = clockText.trim().match(/^(\d{1,2})(?::(\d{2}))?(?::\d{2})?\s*(am|pm)?$/i);
         if (!clock) return null;
         let hours = Number(clock[1]);
-        const shortClock = !clock[3] && /^(am|pm)$/i.test(clock[2] || '');
-        const minutes = shortClock ? 0 : Number(clock[2] || 0);
-        const suffix = (shortClock ? clock[2] : clock[3])?.toLowerCase();
+        const minutes = Number(clock[2] || 0);
+        const suffix = clock[3]?.toLowerCase();
         if (minutes > 59 || hours > (suffix ? 12 : 23) || hours < (suffix ? 1 : 0)) return null;
         if (suffix) hours = (hours % 12) + (suffix === 'pm' ? 12 : 0);
         return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:00`;
@@ -264,8 +287,7 @@ function extractModifyValue(field, message, today, allowBare = false) {
         return digits.length >= 7 && digits.length <= 15 ? `${value.startsWith('+') ? '+' : ''}${digits}` : null;
     }
     if (field === 'reservation_name' || field === 'notes') {
-        const label = field === 'reservation_name' ? '(?:reservation |guest )?name' : '(?:notes?|special requests?)';
-        const match = text.match(new RegExp(`\\b${label}\\s+(?:(?:is|to|as)\\s+)?(.+?)(?=\\s+(?:and|with|phone|contact|on)\\b|[.!?]|$)`, 'i'));
+        const match = extractTextEditSpan(field, text);
         const value = match?.[1] || (allowBare ? text.replace(/^(?:change|update|make it|set it to|set to|to|new)\s+/i, '') : null);
         return value && !/^(?:name|notes?|room|venue|table)$/i.test(value) ? value.trim() : null;
     }
@@ -275,23 +297,36 @@ function extractModifyValue(field, message, today, allowBare = false) {
 function extractModifyChanges(message, today, state) {
     const changes = { ...(state.modify_updates || {}) };
     const missing = [];
-    const checkout = message.match(/\b(?:check[ -]?out|departure)(?: date)?\b/i);
+    // Dates, times, guest counts, and phone numbers inside a name or note are
+    // content, not instructions to amend another reservation field.
+    let structuredText = message;
+    for (const field of ['reservation_name', 'notes']) {
+        const span = extractTextEditSpan(field, structuredText);
+        if (span) structuredText = `${structuredText.slice(0, span.index)} ${structuredText.slice(span.index + span[0].length)}`;
+    }
+    if (state.modify_step === 'awaiting_value' && ['reservation_name', 'notes'].includes(state.modify_field)
+        && !/\b(?:name|notes?|special requests?)\b/i.test(message)) structuredText = '';
+    const checkout = structuredText.match(/\b(?:check[ -]?out|departure)(?: date)?\b/i);
     const awaitingCheckout = state.modify_step === 'awaiting_value' && state.modify_field === 'end_date' && !checkout;
-    const arrivalText = awaitingCheckout ? '' : checkout ? message.slice(0, checkout.index) : message;
-    const fields = ['date', 'end_date', 'start_time', 'people', 'contact_phone', 'reservation_name', 'notes'];
+    const awaitingEndTime = state.modify_step === 'awaiting_value' && state.modify_field === 'end_time'
+        && !/\b(?:start|begin|from)\b/i.test(message);
+    const arrivalText = awaitingCheckout ? '' : checkout ? structuredText.slice(0, checkout.index) : structuredText;
+    const fields = ['date', 'end_date', 'start_time', 'end_time', 'people', 'contact_phone', 'reservation_name', 'notes'];
     const cues = {
         date: hasBookingDateExpression(arrivalText) || /\bday\b/i.test(arrivalText),
         end_date: Boolean(checkout),
-        start_time: /\b(time|schedule|hours?)\b|\b\d{1,2}:\d{2}\b|\b\d{1,2}\s*(?:am|pm)\b/i.test(message),
-        people: /\b(?:guests?(?! name)|people|party(?: size)?|persons?|pax)\b/i.test(message),
-        contact_phone: /\b(phone|telephone|mobile|contact number)\b/i.test(message),
+        start_time: !awaitingEndTime && /\b(time|schedule|hours?)\b|\b\d{1,2}:\d{2}\b|\b\d{1,2}\s*(?:am|pm)\b/i.test(structuredText.replace(/\b(?:end|finish|ending|finishing) time\b.*$/i, '')),
+        end_time: /\b(?:end|finish|ending|finishing) time\b|\b(?:\d{1,2}:\d{2}|\d{1,2}\s*(?:am|pm))\s*(?:to|until|[-–])\s*\d/i.test(structuredText),
+        people: /\b(?:guests?(?! name)|people|party(?: size)?|persons?|pax)\b/i.test(structuredText),
+        contact_phone: /\b(phone|telephone|mobile|contact number)\b/i.test(structuredText),
         reservation_name: /\b(?:reservation |guest )?name\b/i.test(message),
         notes: /\b(notes?|special requests?)\b/i.test(message),
     };
     for (const field of fields) {
         const allowBare = state.modify_step === 'awaiting_value' && state.modify_field === field;
         if (!cues[field] && !allowBare) continue;
-        const input = field === 'date' ? arrivalText : field === 'end_date' ? message.slice(checkout?.index || 0) : message;
+        const input = field === 'date' ? arrivalText : field === 'end_date' ? structuredText.slice(checkout?.index || 0)
+            : ['reservation_name', 'notes'].includes(field) ? message : structuredText;
         const value = extractModifyValue(field, input, today, allowBare);
         if (value === null || value === '') missing.push(field);
         else changes[field] = value;
@@ -308,7 +343,9 @@ function buildModifyPrompt(field) {
         case 'contact_phone':
             return 'What phone number should I use instead?';
         case 'start_time':
-            return 'What time would you like instead? Please reply in HH:MM.';
+            return 'What time would you like instead? You can say 6pm or use HH:MM.';
+        case 'end_time':
+            return 'What end time would you like instead? You can say 7pm or use HH:MM.';
         case 'reservation_name':
             return 'What should the reservation name be instead?';
         case 'people':
@@ -365,6 +402,12 @@ function wantsExistingReservationChange(message) {
 
 function wantsReservationCancellation(message) {
     return /\bcancel\b.*\b(?:booking|reservation|meeting|stay|dinner|room|table)\b/i.test(message);
+}
+
+function wantsConversationClose(message, state) {
+    const text = normalizeEditValue(message).toLowerCase().replace(/[.,!]+/g, ' ').replace(/\s+/g, ' ').trim();
+    if (/^(?:no (?:thank you|thanks)(?: very much)?|(?:that(?:'s| is)|this is) all(?: (?:thank you|thanks))?|nothing else(?: (?:thank you|thanks))?|goodbye|bye(?: bye)?|have a nice day)$/.test(text)) return true;
+    return state.modify_step === 'anything_else' && /^(?:no|nope|thanks|thank you|all done|i(?:'m| am) done)$/.test(text);
 }
 
 function extractLookupPhone(message, today) {
@@ -437,19 +480,19 @@ function extractLookupCriteria(message, todayFormatted) {
         service_candidates: service.ambiguous ? service.candidates : [],
         service_mentioned: hasBookingServiceExpression(detailsText),
         date,
+        date_invalid: hasBookingDateExpression(detailsText) && !date,
         reservation_name,
     };
 }
 
 function extractLookupCorrections(message, todayFormatted) {
     const text = normalizeEditValue(message);
-    const detailsText = redactLookupPhone(text);
     const criteria = extractLookupCriteria(text, todayFormatted);
     const updates = {};
     // A follow-up changes only fields present in this message. Do not let an
     // AI reconstruction of the conversation replace established search values.
-    if (criteria.date) updates.date = criteria.date;
-    else if (!criteria.reservation_name && hasBookingDateExpression(detailsText)) updates.date = '';
+    if (criteria.date) { updates.date = criteria.date; updates.date_invalid = false; }
+    else if (criteria.date_invalid) { updates.date = ''; updates.date_invalid = true; }
     if (criteria.service_type || criteria.service_mentioned) {
         updates.service_type = criteria.service_type;
         updates.service_candidates = criteria.service_candidates;
@@ -475,47 +518,66 @@ async function findBookingForLookup(session_id, criteria) {
            AND ($2 = '' OR service_type = $2)
            AND ($3 = '' OR date = NULLIF($3, '')::date)
            AND ($4 = '' OR LOWER(reservation_name) = LOWER($4))
-         ORDER BY created_at DESC LIMIT 1`,
+         ORDER BY created_at DESC LIMIT 11`,
         [session_id, criteria.service_type || '', parseDate(criteria.date) || '', criteria.reservation_name || '']
     );
 
-    return result.rows[0] || null;
+    return result.rows;
 }
 
 async function findRecoveredBooking(criteria, phone) {
     const result = await query(
         `SELECT * FROM bookings
          WHERE status IN ('pending', 'confirmed', 'modified')
-           AND service_type = $1 AND date = $2
+           AND service_type = $1 AND ($2 = '' OR date = NULLIF($2, '')::date)
            AND LOWER(reservation_name) = LOWER($3)
            AND regexp_replace(COALESCE(contact_phone, ''), '[^0-9]', '', 'g') = $4
-         ORDER BY created_at DESC LIMIT 2`,
-        [criteria.service_type, parseDate(criteria.date), criteria.reservation_name, phone.replace(/\D/g, '')]
+         ORDER BY created_at DESC LIMIT 11`,
+        [criteria.service_type, parseDate(criteria.date) || '', criteria.reservation_name, phone.replace(/\D/g, '')]
     );
-    // Never choose arbitrarily between reservations with the same identifying details.
-    return result.rows.length === 1 ? result.rows[0] : null;
+    return result.rows;
+}
+
+function reservationChoices(bookings) {
+    return bookings.map((booking, index) => ({
+        option_number: index + 1, id: booking.id, service_type: booking.service_type,
+        date: formatDate(booking.date), start_time: String(booking.start_time || '').slice(0, 5),
+        end_time: String(booking.end_time || '').slice(0, 5), people: booking.people,
+    }));
+}
+
+function buildReservationChoicesMessage(options) {
+    const choices = options.map((option) => `${option.option_number}. Reservation #${option.id}: ${option.date}${option.start_time ? ` at ${option.start_time}` : ''}${option.people != null ? `, ${option.people} guests` : ''}`);
+    return `I found ${options.length} matching reservations. Which one would you like to alter?\n${choices.join('\n')}\nYou can reply with its number, date, or time.`;
 }
 
 async function respondToBookingLookup({ res, session_id, message, sessionToken, criteria, phone, action = 'modify', selectedBookingId }) {
     const lookup = getModifyLookupFields(criteria);
     const intent = action === 'cancel' ? 'cancel_booking' : 'modify_booking';
-    let booking = null;
+    let matches = [];
     if (lookup.valid) {
         if (selectedBookingId) {
             const selected = await query(
                 `SELECT * FROM bookings WHERE id = $1 AND status IN ('pending', 'confirmed', 'modified')`,
                 [selectedBookingId]
             );
-            booking = selected.rows[0] || null;
+            matches = selected.rows;
         } else {
-            booking = await findBookingForLookup(session_id, criteria);
-            if (!booking && phone) booking = await findRecoveredBooking(criteria, phone);
+            matches = await findBookingForLookup(session_id, criteria);
+            if (!matches.length && phone) matches = await findRecoveredBooking(criteria, phone);
         }
     }
 
     let state;
     let reply;
     let missing;
+    const booking = matches.length === 1 ? matches[0] : null;
+    const searchState = {
+        service_type: criteria.service_type || '', service_candidates: criteria.service_candidates || [],
+        date: criteria.date || '', reservation_name: criteria.reservation_name || '',
+        date_invalid: criteria.date_invalid || false,
+        modify_mode: 'modify_booking', lookup_action: action,
+    };
     if (booking) {
         state = {
             ...normalizeBooking(booking), modify_mode: 'modify_booking', modify_step: 'choose_field',
@@ -524,32 +586,58 @@ async function respondToBookingLookup({ res, session_id, message, sessionToken, 
         missing = [];
         reply = `I've found your ${booking.service_type} reservation for ${state.date} under the name "${booking.reservation_name}". `
             + (action === 'cancel' ? 'Would you like to proceed with the cancellation?'
-                : 'What would you like to change? You can say date, time, guests, phone number, notes, or name.');
+                : 'What would you like to alter? You can say date, time, guests, phone number, notes, or name.');
         if (action !== 'cancel' && wantsReservationSlip(message) && !wantsExistingReservationChange(message)) {
             reply = booking.people != null
                 ? `Here is your reservation slip for ${booking.reservation_name}. You booked ${booking.people} guests for ${booking.service_type} on ${state.date}.`
                 : `Here is your reservation slip for ${booking.reservation_name}. I have your ${booking.service_type} reservation on ${state.date}, but the guest count was not stored.`;
         }
+    } else if (matches.length > 10) {
+        missing = ['date'];
+        state = { ...searchState, modify_step: 'awaiting_lookup', modify_missing: missing };
+        reply = 'There are several matching reservations. Which date is the reservation you would like to alter?';
+    } else if (matches.length > 1) {
+        missing = ['reservation selection'];
+        const options = reservationChoices(matches);
+        state = { ...searchState, modify_step: 'awaiting_selection', modify_missing: missing,
+            reservation_options: options, lookup_candidate_ids: matches.map((booking) => booking.id) };
+        reply = buildReservationChoicesMessage(options);
+        if (action === 'cancel') reply = reply.replace('alter', 'cancel');
     } else {
         missing = lookup.valid ? ['phone number'] : lookup.missing;
-        state = {
-            service_type: criteria.service_type || '', service_candidates: criteria.service_candidates || [],
-            date: criteria.date || '', reservation_name: criteria.reservation_name || '',
-            modify_mode: 'modify_booking', lookup_action: action,
-            modify_step: lookup.valid ? 'awaiting_verification' : 'awaiting_lookup', modify_missing: missing,
-        };
+        state = { ...searchState,
+            modify_step: lookup.valid ? 'awaiting_verification' : 'awaiting_lookup', modify_missing: missing };
         reply = !lookup.valid ? buildModifyLookupPrompt(missing, state.service_candidates)
             : phone ? "I couldn't match a reservation with those details and that phone number. Please check the original booking phone number, or correct the date, type, or name."
                 : 'To find a reservation from another conversation, please give the phone number used for the original booking. You can also correct the date, type, or name.';
     }
     sessionState.set(session_id, state);
     await saveConversation(session_id, message, reply);
+    const { lookup_candidate_ids, ...publicState } = state;
     return res.json({
-        intent, message: reply, speak: reply, data: state, missing_fields: missing,
+        intent, message: reply, speak: reply, data: publicState, missing_fields: missing,
         confidence: booking ? 1 : 0.9,
         ...(booking ? action === 'cancel' ? { show_cancel_confirm: true } : { show_reservation_slip: true } : {}),
         session_token: sessionToken,
     });
+}
+
+function selectReservationOption(message, options, today) {
+    const text = normalizeEditValue(message).toLowerCase();
+    const reference = text.match(/^(?:the\s+)?(?:reservation|booking)\s*#\s*(\d+)[.!]?$/);
+    if (reference) return options.filter((option) => String(option.id) === reference[1]);
+    const ordinals = { first: 1, second: 2, third: 3, fourth: 4, fifth: 5, sixth: 6, seventh: 7, eighth: 8, ninth: 9, tenth: 10 };
+    const numbered = text.match(/^(?:the\s+)?(?:(?:option|number)\s*#?\s*)?(\d{1,2}|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)(?:\s+(?:one|booking|reservation))?[.!]?$/);
+    if (numbered) {
+        const index = ordinals[numbered[1]] || Number(numbered[1]);
+        return options.filter((option) => option.option_number === index);
+    }
+    const date = extractNaturalBookingDate(text, today);
+    const time = /\b\d{1,2}:\d{2}\b|\b\d{1,2}\s*(?:am|pm)\b/.test(text)
+        ? extractModifyValue('start_time', text, today) : null;
+    if (!date && !time) return [];
+    return options.filter((option) => (!date || parseDate(option.date) === parseDate(date))
+        && (!time || option.start_time === time.slice(0, 5)));
 }
 
 async function loadLatestSessionBooking(session_id) {
@@ -604,6 +692,13 @@ router.post('/', async (req, res) => {
 
         // 🧠 LOAD STATE
         let state = sessionState.get(session_id) || {};
+        if (wantsConversationClose(message, state)) {
+            const farewell = 'Very well then, have a nice day.';
+            sessionState.delete(session_id);
+            await saveConversation(session_id, message, farewell);
+            return res.json({ intent: 'farewell', message: farewell, speak: farewell,
+                data: null, missing_fields: [], confidence: 1, session_token: sessionToken });
+        }
 
         // Memory Retrieval: If we have a phone number or auth, fetch profile/preferences to inject context
         let memoryContext = "";
@@ -665,7 +760,7 @@ router.post('/', async (req, res) => {
             };
         }
 
-        const lookupPending = ['awaiting_lookup', 'awaiting_verification'].includes(state.modify_step);
+        const lookupPending = ['awaiting_lookup', 'awaiting_verification', 'awaiting_selection'].includes(state.modify_step);
         const cancellation = wantsReservationCancellation(normalizedMessage);
         if (!lookupPending && (isReservationLookup(normalizedMessage) || cancellation
             || (wantsExistingReservationChange(normalizedMessage) && !state.edit_booking_id))) {
@@ -730,6 +825,30 @@ router.post('/', async (req, res) => {
         }
 
         if (state.modify_mode === 'modify_booking' && state.modify_step) {
+            if (state.modify_step === 'awaiting_selection') {
+                const options = state.reservation_options || [];
+                const selected = selectReservationOption(normalizedMessage, options, today);
+                if (selected.length === 1 && state.lookup_candidate_ids?.includes(selected[0].id)) {
+                    return respondToBookingLookup({ res, session_id, message, sessionToken,
+                        criteria: { ...state, date: selected[0].date }, selectedBookingId: selected[0].id,
+                        action: cancellation ? 'cancel' : state.lookup_action || 'modify' });
+                }
+                const corrections = extractLookupCriteria(normalizedMessage, today);
+                // A new name/type requires a fresh authorized lookup. A date/time
+                // selection stays within the choices that were already verified.
+                if ((corrections.service_type && corrections.service_type !== state.service_type)
+                    || (corrections.reservation_name && corrections.reservation_name.toLowerCase() !== state.reservation_name.toLowerCase())) {
+                    return respondToBookingLookup({ res, session_id, message, sessionToken,
+                        criteria: { ...state, ...corrections }, phone: extractLookupPhone(normalizedMessage, today),
+                        action: cancellation ? 'cancel' : state.lookup_action || 'modify' });
+                }
+                const reply = `Please choose one reservation before I make any changes. ${buildReservationChoicesMessage(options)}`;
+                await saveConversation(session_id, message, reply);
+                const { lookup_candidate_ids, ...publicState } = state;
+                return res.json({ intent: state.lookup_action === 'cancel' ? 'cancel_booking' : 'modify_booking',
+                    message: reply, speak: reply, data: publicState, missing_fields: ['reservation selection'],
+                    confidence: 1, session_token: sessionToken });
+            }
             if (lookupPending) {
                 const phone = extractLookupPhone(normalizedMessage, today);
                 const barePhone = phone && /^\+?[\d ()-]+$/.test(normalizedMessage.trim());
@@ -737,6 +856,13 @@ router.post('/', async (req, res) => {
                 return respondToBookingLookup({ res, session_id, message, sessionToken,
                     criteria: { ...state, ...corrections }, phone,
                     action: cancellation ? 'cancel' : state.lookup_action || 'modify' });
+            }
+
+            if (state.modify_step === 'anything_else' && /^(?:yes|yes please|sure|of course)[.!]?$/i.test(normalizedMessage.trim())) {
+                const reply = 'Of course. What else would you like me to help you with?';
+                await saveConversation(session_id, message, reply);
+                return res.json({ intent: 'modify_booking', message: reply, speak: reply, data: state,
+                    missing_fields: [], confidence: 1, session_token: sessionToken });
             }
 
             const { changes, missing } = extractModifyChanges(normalizedMessage, today, state);
@@ -772,6 +898,19 @@ router.post('/', async (req, res) => {
                 });
             }
 
+            const latestSelected = await query(
+                `SELECT * FROM bookings WHERE id = $1 AND status IN ('pending', 'confirmed', 'modified')`,
+                [editBookingId]
+            );
+            if (!latestSelected.rows.length) {
+                sessionState.delete(session_id);
+                const reply = 'That reservation is no longer active. Please find the reservation you would like to alter again.';
+                await saveConversation(session_id, message, reply);
+                return res.json({ intent: 'modify_booking', message: reply, speak: reply, data: null,
+                    missing_fields: [], confidence: 1, session_token: sessionToken });
+            }
+            state = { ...state, ...normalizeBooking(latestSelected.rows[0]) };
+
             // Moving hotel arrival dates keeps the existing number of nights unless
             // the guest also supplies a new checkout date.
             if (state.service_type === 'hotel' && changes.date && !changes.end_date) {
@@ -790,9 +929,18 @@ router.post('/', async (req, res) => {
                 });
             }
 
-            const columns = Object.keys(changes);
+            const validation = await validateBookingAlteration(latestSelected.rows[0], changes);
+            if (!validation.valid) {
+                state = { ...state, modify_step: 'choose_field', modify_field: null, modify_updates: null };
+                sessionState.set(session_id, state);
+                await saveConversation(session_id, message, validation.message);
+                return res.json({ intent: 'modify_booking', message: validation.message, speak: validation.message,
+                    data: state, missing_fields: [], confidence: 1, session_token: sessionToken });
+            }
+            const finalChanges = validation.assignments;
+            const columns = Object.keys(finalChanges);
             const values = columns.map((column) => column === 'date' || column === 'end_date'
-                ? parseDate(changes[column]) : changes[column]);
+                ? parseDate(finalChanges[column]) : finalChanges[column]);
             const assignments = columns.map((column, index) => `${column} = $${index + 1}`).join(', ');
             const updated = await query(
                 `UPDATE bookings SET ${assignments}, status = CASE WHEN status = 'confirmed' THEN 'modified' ELSE status END, updated_at = NOW()
@@ -809,8 +957,8 @@ router.post('/', async (req, res) => {
             }
 
             const rawBooking = updated.rows[0];
-            let calendarSync = { status: isCalendarSyncEnabled() ? 'failed' : 'disabled' };
-            if (calendarSync.status !== 'disabled') {
+            let calendarSync = { status: rawBooking.waitlisted ? 'not_required' : isCalendarSyncEnabled() ? 'failed' : 'disabled' };
+            if (calendarSync.status !== 'disabled' && !rawBooking.waitlisted) {
                 try {
                     const eventId = await upsertEvent(rawBooking);
                     if (eventId) {
@@ -827,7 +975,7 @@ router.post('/', async (req, res) => {
             const booking = normalizeBooking(rawBooking);
             state = {
                 ...state, ...booking, calendar_sync: calendarSync,
-                modify_mode: 'modify_booking', modify_step: 'choose_field',
+                modify_mode: 'modify_booking', modify_step: 'anything_else',
                 modify_field: null, modify_updates: null, edit_booking_id: booking.id,
             };
             sessionState.set(session_id, state);
@@ -837,12 +985,14 @@ router.post('/', async (req, res) => {
             if (changes.people) changedDetails.push(`${booking.people} guests`);
             if (changes.contact_phone) changedDetails.push(`phone ${booking.phone_number}`);
             if (changes.start_time) changedDetails.push(`time ${booking.start_time}`);
+            if (finalChanges.end_time) changedDetails.push(`end time ${booking.end_time}`);
             if (changes.reservation_name) changedDetails.push(`name ${booking.reservation_name}`);
             if (changes.notes) changedDetails.push('notes saved');
             const syncMessage = calendarSync.status === 'synced' ? ' Google Calendar has been updated.'
+                : calendarSync.status === 'not_required' ? ' Your reservation remains on the waitlist.'
                 : calendarSync.status === 'disabled' ? ' Google Calendar sync is disabled; your booking changes are saved.'
                     : ' Your booking changes are saved, but Google Calendar could not be updated.';
-            const msg = `I've updated your ${booking.service_type} reservation: ${changedDetails.join(', ')}.${syncMessage}`;
+            const msg = `I've updated your ${booking.service_type} reservation: ${changedDetails.join(', ')}.${syncMessage} Is there anything else I can help you with?`;
             await saveConversation(session_id, message, msg);
             return res.json({
                 intent: 'modify_booking', message: msg, speak: msg, data: state,
@@ -1277,7 +1427,7 @@ router.post('/confirm', requireSessionToken, async (req, res) => {
         // Selection is assigned only after an authorized lookup, and is never
         // accepted from request JSON. Recovery keeps the booking's original session.
         const currentState = sessionState.get(session_id);
-        if (['awaiting_lookup', 'awaiting_verification'].includes(currentState?.modify_step)) {
+        if (['awaiting_lookup', 'awaiting_verification', 'awaiting_selection'].includes(currentState?.modify_step)) {
             return res.json({ success: false, message: 'Please find and verify the reservation first.', session_token: sessionToken });
         }
         const selectedId = currentState?.edit_booking_id;
