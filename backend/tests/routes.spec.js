@@ -696,15 +696,16 @@ const query = jest.fn(async (sql, params = []) => {
 });
 
 await jest.unstable_mockModule('../services/db.js', () => ({ query }));
-await jest.unstable_mockModule('../services/llm.js', () => ({
-  chat: jest.fn(async () => ({
+const defaultChatResponse = {
     message: 'ok',
     speak: 'ok',
     intent: 'unknown',
     data: {},
     missing_fields: [],
     confidence: 1,
-  })),
+};
+await jest.unstable_mockModule('../services/llm.js', () => ({
+  chat: jest.fn(async () => defaultChatResponse),
 }));
 const upsertCalendarEvent = jest.fn(async () => null);
 const calendarEnabled = jest.fn(() => true);
@@ -731,7 +732,7 @@ const runRoutes = process.env.NO_LISTEN !== 'true';
 (runRoutes ? describe : describe.skip)('route flows', () => {
   beforeEach(() => {
     resetState();
-    mockChat.mockClear();
+    mockChat.mockReset().mockResolvedValue(defaultChatResponse);
     mockUpsertEvent.mockReset().mockResolvedValue(null);
     mockCalendarEnabled.mockReset().mockReturnValue(true);
     process.env.STAFF_WEBHOOK_URL = '';
@@ -1104,25 +1105,6 @@ const runRoutes = process.env.NO_LISTEN !== 'true';
       updated_at: new Date('2026-05-01T00:00:00Z'),
     });
 
-    const foundBookingResponse = {
-      message: 'I found your meeting reservation.',
-      speak: 'I found your meeting reservation.',
-      intent: 'modify_booking',
-      data: {
-        service_type: 'meeting',
-        date: '15-05-2026',
-        start_time: '10:00',
-        end_time: '11:00',
-        people: 6,
-        location: 'Room 4',
-        notes: '',
-        reservation_name: 'Talia',
-        phone_number: '',
-      },
-      missing_fields: [],
-      confidence: 1,
-    };
-
     const lookupRes = await request(app)
       .post('/api/chat')
       .send({
@@ -1134,13 +1116,11 @@ const runRoutes = process.env.NO_LISTEN !== 'true';
     expect(lookupRes.body.message).toContain('To find your booking');
     expect(lookupRes.body.missing_fields).toEqual(['date', 'reservation name']);
 
-    mockChat.mockResolvedValueOnce(foundBookingResponse);
-
     const fieldRes = await request(app)
       .post('/api/chat')
       .send({
         session_id: 'sess-modify',
-        message: 'it\'s on 15th next month and name is Talia',
+        message: 'it\'s on 15-05-2026 and name is Talia',
       });
 
     expect(fieldRes.status).toBe(200);
@@ -1179,6 +1159,137 @@ const runRoutes = process.env.NO_LISTEN !== 'true';
     expect(slipRes.body.show_reservation_slip).toBe(true);
     expect(slipRes.body.data.people).toBe(6);
     expect(slipRes.body.message).toContain('You booked 6 guests');
+  });
+
+  describe('booking lookup corrections', () => {
+    let fixtureNumber = 0;
+    let sessionId;
+    let originalBookings;
+
+    beforeEach(() => {
+      sessionId = `sess-lookup-correction-${++fixtureNumber}`;
+      state.bookings.push({
+        id: 70,
+        session_id: sessionId,
+        service_type: 'meeting',
+        date: '2026-10-14',
+        start_time: '10:00:00',
+        end_time: '11:00:00',
+        reservation_name: 'Stewart',
+        people: 6,
+        notes: '',
+        status: 'confirmed',
+        waitlisted: false,
+        contact_phone: '0801111111',
+        google_event_id: 'existing-meeting-event',
+        created_at: new Date('2026-10-01T00:00:00Z'),
+        updated_at: new Date('2026-10-01T00:00:00Z'),
+      });
+      originalBookings = state.bookings.map(cloneRow);
+      query.mockClear();
+      // Simulate the stale model output that produced the screenshot's date/name drift.
+      mockChat.mockResolvedValue({
+        ...defaultChatResponse,
+        intent: 'modify_booking',
+        data: {
+          service_type: 'hotel', date: '12-10-2026', reservation_name: 'Stuart',
+          people: 99, phone_number: '0809999999',
+        },
+      });
+    });
+
+    async function send(message) {
+      const response = await request(app).post('/api/chat').send({ session_id: sessionId, message });
+      expect(response.status).toBe(200);
+      return response;
+    }
+
+    async function startFailedLookup() {
+      const response = await send('I want to change my meeting reservation on 14-10-2026 under the name Stuart');
+      expect(response.body.message).toContain("I couldn't find a meeting reservation for 14-10-2026");
+      expect(response.body.data).toEqual(expect.objectContaining({
+        date: '14-10-2026', service_type: 'meeting', reservation_name: 'Stuart',
+        modify_step: 'awaiting_lookup',
+      }));
+      expect(response.body.data.edit_booking_id).toBeUndefined();
+      expectLookupDidNotMutateBookings();
+    }
+
+    function expectLookupDidNotMutateBookings() {
+      expect(state.bookings).toEqual(originalBookings);
+      expect(mockUpsertEvent).not.toHaveBeenCalled();
+      const bookingWrites = query.mock.calls.filter(([sql]) =>
+        /^(?:insert into|update|delete from) bookings\b/.test(normalizeSql(sql))
+      );
+      expect(bookingWrites).toEqual([]);
+    }
+
+    it.each(['Stewart', 'The name is Stewart'])(
+      'corrects the name with "%s" without changing the date or service',
+      async (correction) => {
+        await startFailedLookup();
+        const response = await send(correction);
+        expect(response.body.message).toContain("I've found your meeting reservation for 14-10-2026");
+        expect(response.body.data).toEqual(expect.objectContaining({
+          date: '14-10-2026', service_type: 'meeting', reservation_name: 'Stewart',
+          edit_booking_id: 70, modify_step: 'choose_field', people: 6,
+        }));
+        expect(mockChat).not.toHaveBeenCalled();
+        expectLookupDidNotMutateBookings();
+      }
+    );
+
+    it.each(['May', 'Friday'])('does not treat the explicit name "%s" as a date correction', async (name) => {
+      await startFailedLookup();
+      const response = await send(`The name is ${name}`);
+      expect(response.body.data).toEqual(expect.objectContaining({
+        date: '14-10-2026', service_type: 'meeting', reservation_name: name,
+        modify_step: 'awaiting_lookup',
+      }));
+      expect(mockChat).not.toHaveBeenCalled();
+      expectLookupDidNotMutateBookings();
+    });
+
+    it('changes only the explicitly corrected date while retaining the lookup name and service', async () => {
+      await startFailedLookup();
+      const response = await send('Actually, 12-10-2026');
+      expect(response.body.message).toContain('meeting reservation for 12-10-2026 under the name "Stuart"');
+      expect(response.body.data).toEqual(expect.objectContaining({
+        date: '12-10-2026', service_type: 'meeting', reservation_name: 'Stuart',
+        modify_step: 'awaiting_lookup',
+      }));
+      expect(response.body.data.edit_booking_id).toBeUndefined();
+      expect(mockChat).not.toHaveBeenCalled();
+      expectLookupDidNotMutateBookings();
+    });
+
+    it('preserves the pending criteria when the user repeats a lookup without supplying new details', async () => {
+      await startFailedLookup();
+      const response = await send('Find my reservation');
+      expect(response.body.data).toEqual(expect.objectContaining({
+        date: '14-10-2026', service_type: 'meeting', reservation_name: 'Stuart',
+        modify_step: 'awaiting_lookup',
+      }));
+      expect(response.body.message).toContain('meeting reservation for 14-10-2026 under the name "Stuart"');
+      expect(mockChat).not.toHaveBeenCalled();
+      expectLookupDidNotMutateBookings();
+    });
+
+    it('fills a missing reservation type without starting a new booking or losing the date/name', async () => {
+      const incomplete = await send('I want to change my reservation on 14-10-2026 under the name Stewart');
+      expect(incomplete.body.missing_fields).toEqual(['type of reservation']);
+      expect(incomplete.body.data.modify_step).toBe('awaiting_lookup');
+      expectLookupDidNotMutateBookings();
+
+      const response = await send('meeting');
+      expect(response.body.message).toContain("I've found your meeting reservation for 14-10-2026");
+      expect(response.body.data).toEqual(expect.objectContaining({
+        date: '14-10-2026', service_type: 'meeting', reservation_name: 'Stewart',
+        edit_booking_id: 70, modify_step: 'choose_field',
+      }));
+      expect(mockChat).not.toHaveBeenCalled();
+      expectLookupDidNotMutateBookings();
+    });
   });
 
   describe('plain-English booking changes', () => {

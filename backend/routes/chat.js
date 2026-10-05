@@ -194,9 +194,9 @@ function buildAlternativeMessage(data) {
 
 function getModifyLookupFields(data) {
     return {
-        valid: data.date && data.service_type && data.reservation_name,
+        valid: bookingDateKey(data.date) && data.service_type && data.reservation_name,
         missing: [
-            !data.date && 'date',
+            !bookingDateKey(data.date) && 'date',
             !data.service_type && 'type of reservation',
             !data.reservation_name && 'reservation name',
         ].filter(Boolean),
@@ -410,14 +410,41 @@ function extractLookupCriteria(message, todayFormatted) {
     ];
     const reservationNameMatch = namePatterns.map((pattern) => text.match(pattern)).find(Boolean);
     const reservation_name = reservationNameMatch ? reservationNameMatch[1].trim().replace(/\s+/g, ' ') : '';
-    const service_type = inferServiceTypeFromMessage(text);
-    const date = extractLookupDate(text, todayFormatted);
+    // Names can contain date/type words (for example May or Friday). Only
+    // interpret the surrounding text as the reservation date and service.
+    const detailsText = reservationNameMatch
+        ? `${text.slice(0, reservationNameMatch.index)} ${text.slice(reservationNameMatch.index + reservationNameMatch[0].length)}`
+        : text;
+    const service_type = inferServiceTypeFromMessage(detailsText);
+    const date = extractLookupDate(detailsText, todayFormatted);
 
     return {
         service_type,
         date,
         reservation_name,
     };
+}
+
+function extractLookupCorrections(message, todayFormatted) {
+    const text = normalizeEditValue(message);
+    const criteria = extractLookupCriteria(text, todayFormatted);
+    const updates = {};
+    // A follow-up changes only fields present in this message. Do not let an
+    // AI reconstruction of the conversation replace established search values.
+    if (criteria.date) updates.date = criteria.date;
+    else if (!criteria.reservation_name && hasBookingDateExpression(text)) updates.date = '';
+    if (criteria.service_type) updates.service_type = criteria.service_type;
+    if (criteria.reservation_name) updates.reservation_name = criteria.reservation_name;
+
+    const bareName = text.replace(/^(?:actually[,:]?|it(?:'s| is)|my name is|the name is)\s+/i, '').replace(/[.!]$/, '').trim();
+    const isName = /^[\p{L}][\p{L}\p{M}'’-]*(?:\s+[\p{L}][\p{L}\p{M}'’-]*){0,3}$/u.test(bareName);
+    const isAcknowledgement = /^(?:yes|no|ok|okay|thanks|thank you|please|correct|right|try again|search again|never mind)$/i.test(bareName);
+    const hasLookupInstruction = /\b(find|show|view|see|search|reservation|booking|date|name|type|please|cancel|change|update|modify|edit)\b/i.test(bareName);
+    if (Object.keys(updates).length === 0 && isName && !isAcknowledgement && !hasLookupInstruction
+        && !hasBookingDateExpression(bareName)) {
+        updates.reservation_name = bareName;
+    }
+    return updates;
 }
 
 async function findBookingForLookup(session_id, criteria) {
@@ -548,8 +575,8 @@ router.post('/', async (req, res) => {
             };
         }
 
-        if (isReservationLookup(normalizedMessage)
-            || (wantsExistingReservationChange(normalizedMessage) && !state.edit_booking_id)) {
+        if (state.modify_step !== 'awaiting_lookup' && (isReservationLookup(normalizedMessage)
+            || (wantsExistingReservationChange(normalizedMessage) && !state.edit_booking_id))) {
             const lookupCriteria = extractLookupCriteria(normalizedMessage, today);
             const hasLookupCriteria = Boolean(
                 lookupCriteria.date || lookupCriteria.service_type || lookupCriteria.reservation_name
@@ -634,7 +661,8 @@ router.post('/', async (req, res) => {
             }
         }
 
-        if (wantsFreshReservation(normalizedMessage)) {
+        if (wantsFreshReservation(normalizedMessage)
+            && (state.modify_step !== 'awaiting_lookup' || /\b(book|reserve|new|another)\b/i.test(normalizedMessage))) {
             state = {
                 reservation_name: '',
                 phone_number: state.phone_number || '',
@@ -642,7 +670,8 @@ router.post('/', async (req, res) => {
             sessionState.set(session_id, state);
         }
 
-        if (wantsReservationSlip(normalizedMessage) && !wantsExistingReservationChange(normalizedMessage)) {
+        if (state.modify_step !== 'awaiting_lookup' && wantsReservationSlip(normalizedMessage)
+            && !wantsExistingReservationChange(normalizedMessage)) {
             const latestBooking = state.edit_booking_id || state.id
                 ? state
                 : normalizeBooking(await loadLatestSessionBooking(session_id));
@@ -677,17 +706,12 @@ router.post('/', async (req, res) => {
 
         if (state.modify_mode === 'modify_booking' && state.modify_step) {
             if (state.modify_step === 'awaiting_lookup') {
-                const llmResponse = await chat(history, normalizedMessage, today, state, memoryContext);
-                const validation = validateBookingResponse(llmResponse);
-                const parsed = validation.data;
-
-                const nextState = {
+                state = {
                     ...state,
-                    ...parsed.data,
+                    ...extractLookupCorrections(normalizedMessage, today),
                     modify_mode: 'modify_booking',
                     modify_step: 'awaiting_lookup',
                 };
-                state = nextState;
 
                 const lookup = getModifyLookupFields(state);
                 if (!lookup.valid) {
@@ -701,35 +725,24 @@ router.post('/', async (req, res) => {
                         speak: msg,
                         data: state,
                         missing_fields: lookup.missing,
-                        confidence: parsed.confidence ?? 1,
+                        confidence: 1,
                         session_token: sessionToken,
                     });
                 }
 
                 sessionState.set(session_id, state);
 
-                const parsedDate = parseDate(state.date);
-                const serviceType = String(state.service_type || '').toLowerCase().trim();
-                const reservationName = String(state.reservation_name || '').toLowerCase().trim();
+                const foundBooking = await findBookingForLookup(session_id, state);
 
-                const existing = await query(
-                    `SELECT * FROM bookings 
-                     WHERE date = $1 
-                     AND service_type = $2 
-                     AND LOWER(reservation_name) = $3
-                     AND status IN ('pending', 'confirmed', 'modified')
-                     ORDER BY created_at DESC LIMIT 1`,
-                    [parsedDate, serviceType, reservationName]
-                );
-
-                if (existing.rows.length > 0) {
-                    const booking = existing.rows[0];
+                if (foundBooking) {
+                    const booking = foundBooking;
                     state = {
                         ...state,
                         ...normalizeBooking(booking),
                         modify_mode: 'modify_booking',
                         modify_step: 'choose_field',
                         modify_field: null,
+                        modify_missing: null,
                         edit_booking_id: booking.id,
                     };
                     sessionState.set(session_id, state);
@@ -742,7 +755,7 @@ router.post('/', async (req, res) => {
                         speak: msg,
                         data: state,
                         missing_fields: [],
-                        confidence: parsed.confidence ?? 1,
+                        confidence: 1,
                         session_token: sessionToken,
                     });
                 }
@@ -757,7 +770,7 @@ router.post('/', async (req, res) => {
                     speak: msg,
                     data: state,
                     missing_fields: [],
-                    confidence: parsed.confidence ?? 1,
+                    confidence: 1,
                     session_token: sessionToken,
                 });
             }
