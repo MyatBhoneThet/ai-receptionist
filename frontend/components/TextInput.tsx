@@ -1,15 +1,16 @@
 'use client';
 
-import React, { useState, useRef, KeyboardEvent, ChangeEvent } from 'react';
+import React, { useState, useRef, useEffect, KeyboardEvent, ChangeEvent } from 'react';
 
 interface TextInputProps {
     onSend: (text: string) => void;
     disabled?: boolean;
     value?: string;
     onChangeValue?: (v: string) => void;
+    focusRequest?: number;
 }
 
-export default function TextInput({ onSend, disabled, value: controlled, onChangeValue }: TextInputProps) {
+export default function TextInput({ onSend, disabled, value: controlled, onChangeValue, focusRequest = 0 }: TextInputProps) {
     const [internal, setInternal] = useState('');
     const inputRef = useRef<HTMLInputElement>(null);
 
@@ -19,6 +20,32 @@ export default function TextInput({ onSend, disabled, value: controlled, onChang
         if (onChangeValue) onChangeValue(v);
         else setInternal(v);
     };
+
+    useEffect(() => {
+        if (disabled) return;
+        const active = document.activeElement;
+        // Restore the composer without taking focus from the language selector
+        // or another control the user is interacting with.
+        if (!active || active === document.body || active === inputRef.current
+            || active instanceof HTMLElement && active.closest('[data-chat-composer], [data-chat-focus-return]')) {
+            inputRef.current?.focus({ preventScroll: true });
+        }
+    }, [disabled, focusRequest]);
+
+    useEffect(() => {
+        const handleTyping = (event: globalThis.KeyboardEvent) => {
+            if (disabled || event.defaultPrevented || event.isComposing
+                || event.ctrlKey || event.metaKey || event.altKey || event.key.length !== 1) return;
+            const target = event.target instanceof Element ? event.target : document.activeElement;
+            if (target?.closest('input, textarea, select, button, a, [contenteditable]:not([contenteditable="false"]), [role="dialog"], [role="button"], [role="textbox"]')) return;
+            // Typing after clicking the conversation should start a draft too.
+            event.preventDefault();
+            inputRef.current?.focus({ preventScroll: true });
+            setValue(value + event.key);
+        };
+        window.addEventListener('keydown', handleTyping);
+        return () => window.removeEventListener('keydown', handleTyping);
+    }, [disabled, value, onChangeValue]);
 
     const handleSend = () => {
         const trimmed = value.trim();
@@ -49,6 +76,7 @@ export default function TextInput({ onSend, disabled, value: controlled, onChang
                 onChange={handleChange}
                 onKeyDown={handleKeyDown}
                 disabled={disabled}
+                autoFocus
                 aria-label="Chat input"
             />
             <button

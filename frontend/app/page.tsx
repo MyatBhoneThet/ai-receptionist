@@ -72,6 +72,7 @@ export default function Page() {
     const [isListening, setIsListening] = useState<boolean>(false);
     const [speechError, setSpeechError] = useState<string>('');
     const [inputValue, setInputValue] = useState<string>('');
+    const [inputFocusRequest, setInputFocusRequest] = useState(0);
     const [speechLang, setSpeechLang] = useState<string>('en-US');
     const confirmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -288,34 +289,35 @@ export default function Page() {
                                     </span>
                                 </div>
                             )}
-                            <div className="flex items-center space-x-4">
+                            <div className="mb-3 flex items-center gap-2 pl-[4.5rem] sm:pl-20">
+                                <label htmlFor="speech-language" className="text-[10px] font-bold uppercase tracking-widest text-ink/50">Voice lang</label>
+                                <select
+                                    id="speech-language"
+                                    className="rounded-full border border-parchment bg-white px-3 py-1 text-xs text-ink/70"
+                                    value={speechLang}
+                                    onChange={(e) => setSpeechLang(e.target.value)}
+                                >
+                                    <option value="en-US">English (US)</option>
+                                    <option value="es-ES">Español</option>
+                                    <option value="fr-FR">Français</option>
+                                    <option value="th-TH">ไทย</option>
+                                </select>
+                            </div>
+                            <div className="flex items-center gap-4 sm:gap-6" data-chat-composer>
                                 <VoiceInput
                                     onTranscript={handleVoiceTranscript}
                                     onInterimTranscript={setInterimTranscript}
                                     onListeningChange={(next) => {
+                                        if (!next && isListening) setInputFocusRequest((request) => request + 1);
                                         setIsListening(next);
                                         if (next) setSpeechError('');
                                     }}
                                     onError={setSpeechError}
-                                    disabled={loading || resetting}
+                                    disabled={loading || resetting || showConfirm}
                                     lang={speechLang}
                                 />
-                                <div className="min-w-0 flex-1 space-y-3">
-                                    <div className="flex items-center gap-2">
-                                        <label htmlFor="speech-language" className="text-[10px] font-bold uppercase tracking-widest text-ink/50">Voice lang</label>
-                                        <select
-                                            id="speech-language"
-                                            className="rounded-full border border-parchment bg-white px-3 py-1 text-xs text-ink/70"
-                                            value={speechLang}
-                                            onChange={(e) => setSpeechLang(e.target.value)}
-                                        >
-                                            <option value="en-US">English (US)</option>
-                                            <option value="es-ES">Español</option>
-                                            <option value="fr-FR">Français</option>
-                                            <option value="th-TH">ไทย</option>
-                                        </select>
-                                    </div>
-                                    <TextInput onSend={handleTextSend} disabled={loading || resetting} value={inputValue} onChangeValue={setInputValue} />
+                                <div className="min-w-0 flex-1">
+                                    <TextInput onSend={handleTextSend} disabled={loading || resetting || showConfirm} value={inputValue} onChangeValue={setInputValue} focusRequest={inputFocusRequest} />
                                 </div>
                             </div>
                             {speechError && <p className="mt-3 text-xs text-ink/70" role="alert">{speechError}</p>}
@@ -343,6 +345,7 @@ export default function Page() {
                          <button
                             className="w-full flex items-center justify-center space-x-2 rounded-full border border-ink/10 p-4 text-xs font-bold text-ink/60 transition-all hover:bg-ink hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
                             disabled={loading || resetting || !sessionId}
+                            data-chat-focus-return
                             onClick={handleClearConversation}
                         >
                             <span>{resetting ? 'Clearing Conversation…' : 'Clear Conversation'}</span>
