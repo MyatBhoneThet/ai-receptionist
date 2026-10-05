@@ -169,7 +169,9 @@ export default function Page() {
 
     const handleVoiceTranscript = useCallback((text: string) => {
         setInterimTranscript('');
-        setInputValue(text);
+        const transcript = text.trim();
+        if (!transcript) return;
+        setInputValue((draft) => `${draft}${draft && !/\s$/.test(draft) ? ' ' : ''}${transcript}`);
     }, []);
 
     const handleTextSend = useCallback((text: string) => {
