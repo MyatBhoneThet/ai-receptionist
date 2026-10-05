@@ -36,7 +36,7 @@ CREATE TABLE users (
 CREATE TABLE customers (
   id           SERIAL PRIMARY KEY,
   name         TEXT,
-  phone        TEXT UNIQUE,
+  phone_number TEXT UNIQUE,
   email        TEXT,
   notes        TEXT DEFAULT '',
   preferences  JSONB DEFAULT '{}',
@@ -179,7 +179,7 @@ CREATE INDEX idx_bookings_customer     ON bookings(customer_id);
 CREATE INDEX idx_conv_session          ON conversations(session_id);
 CREATE INDEX idx_conv_created          ON conversations(created_at);
 CREATE INDEX idx_users_email           ON users(email);
-CREATE INDEX idx_customers_phone       ON customers(phone);
+CREATE INDEX idx_customers_phone_number ON customers(phone_number);
 CREATE INDEX idx_audit_entity          ON audit_logs(entity, entity_id);
 CREATE INDEX idx_audit_created         ON audit_logs(created_at DESC);
 

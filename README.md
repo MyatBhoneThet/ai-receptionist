@@ -106,7 +106,10 @@ cd ../frontend
 npm install
 ```
 
-### 4. Initialize Database
+### 4. Initialize an Empty Database
+`db:init` resets all application tables. Use it only for an empty database or an
+intentional reset.
+
 ```bash
 cd backend
 npm run db:init
@@ -114,6 +117,16 @@ npm run db:seed:inventory
 ```
 
 That schema includes the application settings and audit tables used by the admin settings, booking, and inventory screens.
+
+For an existing database initialized with the former `customers.phone` column,
+apply the customer phone migration instead. It preserves the existing customer
+records and renames the column to `phone_number`, as required by booking and
+customer-memory queries:
+
+```bash
+cd backend
+npm run db:migrate:customer-phone
+```
 
 ### 5. Run the Application
 From the project root, start both the backend and frontend:

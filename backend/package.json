@@ -9,6 +9,7 @@
     "dev": "nodemon --legacy-watch --watch index.js --watch middleware --watch routes --watch services --watch validation --watch scripts index.js",
     "db:init": "node scripts/initDb.js",
     "db:migrate": "node scripts/migrateDb.js",
+    "db:migrate:customer-phone": "node scripts/migrateCustomerPhone.js",
     "db:seed:inventory": "node scripts/seedInventory.js",
     "test": "NO_LISTEN=true npm run test:api",
     "test:api": "NODE_ENV=test NODE_OPTIONS=--experimental-vm-modules jest --runInBand"

@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { readFileSync } from 'node:fs';
 import pkg from 'pg';
 
 const { Pool } = pkg;
@@ -43,6 +44,8 @@ async function migrate() {
       updated_at      TIMESTAMPTZ DEFAULT NOW()
     );
   `);
+
+  await run(readFileSync(new URL('../../db/migrations/20261005_customer_phone_number.sql', import.meta.url), 'utf8'));
 
   await run(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS end_date DATE;`);
   await run(`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS waitlisted BOOLEAN DEFAULT FALSE;`);
