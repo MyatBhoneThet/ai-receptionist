@@ -183,7 +183,7 @@ export async function cancelEvent(googleEventId) {
         console.log('[Google Calendar] Deleted:', googleEventId);
         return true;
     } catch (error) {
-        if (error.code === 404 || error.code === 410) {
+        if ([404, 410].includes(Number(error.code || error.response?.status))) {
             console.warn('[Google Calendar] Event already missing:', googleEventId);
             return true;
         }
@@ -207,7 +207,7 @@ export async function getEventStatus(googleEventId) {
             reason: res.data.status === 'cancelled' ? 'cancelled' : 'found',
         };
     } catch (error) {
-        if (error.code === 404 || error.code === 410) {
+        if ([404, 410].includes(Number(error.code || error.response?.status))) {
             return { available: false, reason: 'missing' };
         }
         console.error('[Google Calendar] Status check error:', error.message);

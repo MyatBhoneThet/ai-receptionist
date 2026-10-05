@@ -95,6 +95,13 @@ async function cancelCalendarEventForBooking(booking) {
     return deleted;
 }
 
+function calendarSyncLimit(limit) {
+    const requested = Number(limit ?? 100);
+    return Number.isFinite(requested)
+        ? Math.max(1, Math.min(Math.floor(requested), 500))
+        : 100;
+}
+
 async function syncDeletedCalendarEvents(limit = 100) {
     const result = await query(
         `SELECT * FROM bookings
@@ -102,7 +109,7 @@ async function syncDeletedCalendarEvents(limit = 100) {
            AND status != 'cancelled'
          ORDER BY updated_at DESC
          LIMIT $1`,
-        [Math.min(Number(limit) || 100, 500)]
+        [calendarSyncLimit(limit)]
     );
 
     const synced = [];
@@ -129,16 +136,70 @@ async function syncDeletedCalendarEvents(limit = 100) {
     return { checked: result.rows.length, synced, errors };
 }
 
+async function syncBookingsToCalendar(limit = 100) {
+    const enabled = isCalendarSyncEnabled();
+    const result = { checked: 0, synced: [], skipped: [], errors: [], enabled };
+    if (!enabled) return result;
+
+    const bookings = await query(
+        `SELECT * FROM bookings
+         WHERE status != 'cancelled'
+         ORDER BY updated_at DESC
+         LIMIT $1`,
+        [calendarSyncLimit(limit)]
+    );
+    result.checked = bookings.rows.length;
+
+    for (const booking of bookings.rows) {
+        // Existing events still need their saved details repaired, including
+        // legacy pending or waitlisted reservations. Creating a new event is
+        // reserved for confirmed or modified reservations with an allocation.
+        const canCreateEvent = ['confirmed', 'modified'].includes(booking.status)
+            && booking.waitlisted !== true;
+        if (booking.status === 'cancelled' || (!booking.google_event_id && !canCreateEvent)) {
+            result.skipped.push({
+                id: booking.id,
+                reason: booking.status === 'cancelled' ? 'cancelled'
+                    : booking.waitlisted === true ? 'waitlisted' : 'not_confirmed',
+            });
+            continue;
+        }
+
+        try {
+            const eventId = await upsertEvent(booking);
+            if (!eventId) {
+                result.errors.push({ id: booking.id, error: 'Google Calendar could not be updated.' });
+                continue;
+            }
+            if (eventId !== booking.google_event_id) {
+                await query('UPDATE bookings SET google_event_id = $1 WHERE id = $2', [eventId, booking.id]);
+            }
+            result.synced.push({ id: booking.id, status: 'synced' });
+        } catch (error) {
+            result.errors.push({ id: booking.id, error: error.message || 'Google Calendar could not be updated.' });
+        }
+    }
+
+    return result;
+}
+
 // ── Routes ────────────────────────────────────────────────────────────────
 
 // POST /api/bookings/sync-calendar
 router.post('/sync-calendar', requireAdminToken, async (req, res) => {
+    const mode = req.body?.mode || 'deletions';
+    if (!['bookings', 'deletions'].includes(mode)) {
+        return res.status(400).json({ error: 'Calendar sync mode must be bookings or deletions.' });
+    }
     try {
-        const result = await syncDeletedCalendarEvents(req.body?.limit);
+        const result = mode === 'bookings'
+            ? await syncBookingsToCalendar(req.body?.limit)
+            : await syncDeletedCalendarEvents(req.body?.limit);
         return res.json(result);
     } catch (err) {
         console.error('[POST /api/bookings/sync-calendar] Error:', err);
-        return res.status(500).json({ error: 'Failed to sync calendar deletions.' });
+        return res.status(500).json({ error: mode === 'bookings'
+            ? 'Failed to sync bookings to Google Calendar.' : 'Failed to sync calendar deletions.' });
     }
 });
 

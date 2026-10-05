@@ -7,7 +7,7 @@ import {
   getRecentBookings,
   fetchMe,
   getAllBookings,
-  syncCalendarDeletions,
+  syncCalendarBookings,
   updateBookingStatus,
 } from '../../lib/api';
 
@@ -28,6 +28,7 @@ export default function AdminDashboard() {
   const [bookings, setBookings] = useState<any[]>([]);
   const [busyId, setBusyId] = useState<number | null>(null);
   const [syncingCalendar, setSyncingCalendar] = useState(false);
+  const [calendarNotice, setCalendarNotice] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>(''); 
   const [weekView, setWeekView] = useState<{ date: string; items: any[] }[]>([]);
 
@@ -71,25 +72,8 @@ export default function AdminDashboard() {
   }, [getStoredToken, statusFilter]);
 
   useEffect(() => {
-    let cancelled = false;
-
-    (async () => {
-      await loadAdminData(true);
-      try {
-        const result = await syncCalendarDeletions(getStoredToken());
-        if (!cancelled && result.synced?.length) {
-          await loadAdminData();
-          setError(`Synced ${result.synced.length} deleted Google Calendar booking(s).`);
-        }
-      } catch {
-        // The dashboard should still render if Google Calendar is temporarily unavailable.
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [getStoredToken, loadAdminData]);
+    void loadAdminData(true);
+  }, [loadAdminData]);
 
   const handleStatus = async (id: number, status: string) => {
     setBusyId(id);
@@ -108,13 +92,20 @@ export default function AdminDashboard() {
   const handleCalendarSync = async () => {
     setSyncingCalendar(true);
     setError('');
+    setCalendarNotice('');
     try {
-      const result = await syncCalendarDeletions(getStoredToken());
-      await loadAdminData();
+      const result = await syncCalendarBookings(getStoredToken());
+      if (!result.enabled) {
+        setCalendarNotice('Google Calendar sync is disabled. Configure GOOGLE_CALENDAR_ID, GOOGLE_CLIENT_EMAIL, and GOOGLE_PRIVATE_KEY on the backend, then try again.');
+        return;
+      }
+      if (result.synced?.length) await loadAdminData();
       const syncedCount = result.synced?.length || 0;
-      setError(syncedCount ? `Synced ${syncedCount} deleted Google Calendar booking(s).` : 'Calendar sync complete. No deleted bookings found.');
+      const failedCount = result.errors?.length || 0;
+      const skippedCount = result.skipped?.length || 0;
+      setCalendarNotice(`Google Calendar: ${syncedCount} booking(s) updated, ${failedCount} failed, ${skippedCount} skipped. ${failedCount ? 'Check the backend logs for failed bookings and try again.' : result.checked === 0 ? 'No bookings to sync.' : ''}`.trim());
     } catch (err: any) {
-      setError(err?.response?.data?.error || 'Failed to sync Google Calendar deletions');
+      setError(err?.response?.data?.error || err?.message || 'Failed to sync bookings to Google Calendar');
     } finally {
       setSyncingCalendar(false);
     }
@@ -138,6 +129,12 @@ export default function AdminDashboard() {
       {error && (
         <div className="mx-10 mt-4 rounded-xl border border-parchment bg-white px-4 py-3 text-sm font-medium text-ink/70 shadow-sm">
           {error}
+        </div>
+      )}
+
+      {calendarNotice && (
+        <div role="status" className="mx-10 mt-4 rounded-xl border border-parchment bg-white px-4 py-3 text-sm font-medium text-ink/70 shadow-sm">
+          {calendarNotice}
         </div>
       )}
 

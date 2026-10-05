@@ -118,6 +118,18 @@ describe('Google Calendar booking sync', () => {
     expect(events.insert).not.toHaveBeenCalled();
   });
 
+  it.each([{ code: '404' }, { response: { status: 410 } }])('recognizes a missing event during status checks: %j', async (providerError) => {
+    events.get.mockRejectedValue(Object.assign(new Error('Event removed'), providerError));
+    const { getEventStatus } = await loadService();
+    expect(await getEventStatus('removed-event')).toEqual({ available: false, reason: 'missing' });
+  });
+
+  it.each([{ code: '404' }, { response: { status: 410 } }])('treats an already removed event as successfully deleted: %j', async (providerError) => {
+    events.delete.mockRejectedValue(Object.assign(new Error('Event removed'), providerError));
+    const { cancelEvent } = await loadService();
+    expect(await cancelEvent('removed-event')).toBe(true);
+  });
+
   it.each(['GOOGLE_CALENDAR_ID', 'GOOGLE_CLIENT_EMAIL', 'GOOGLE_PRIVATE_KEY'])('disables sync when %s is missing', async (key) => {
     delete process.env[key];
     const { isCalendarSyncEnabled, upsertEvent } = await loadService();

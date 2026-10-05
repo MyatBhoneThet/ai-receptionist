@@ -957,8 +957,11 @@ router.post('/', async (req, res) => {
             }
 
             const rawBooking = updated.rows[0];
-            let calendarSync = { status: rawBooking.waitlisted ? 'not_required' : isCalendarSyncEnabled() ? 'failed' : 'disabled' };
-            if (calendarSync.status !== 'disabled' && !rawBooking.waitlisted) {
+            // Legacy confirmed reservations can retain a waitlist flag. Keep an
+            // existing event current; only a waitlist without an event skips sync.
+            const needsCalendarSync = !rawBooking.waitlisted || Boolean(rawBooking.google_event_id);
+            let calendarSync = { status: !needsCalendarSync ? 'not_required' : isCalendarSyncEnabled() ? 'failed' : 'disabled' };
+            if (needsCalendarSync && calendarSync.status !== 'disabled') {
                 try {
                     const eventId = await upsertEvent(rawBooking);
                     if (eventId) {
@@ -1459,15 +1462,14 @@ router.post('/confirm', requireSessionToken, async (req, res) => {
         let targetStatus = 'confirmed';
         if (action === 'cancel') {
             targetStatus = 'cancelled';
-        } else if (currentStatus === 'confirmed') {
-            // Already confirmed, no need to update status unless it was 'modified'
-            return res.json({ success: true, booking_id: bookingId, message: 'Already confirmed.', session_token: sessionToken });
         }
-
-        const result = await query(
-            `UPDATE bookings SET status = $1, updated_at = NOW() WHERE id = $2 RETURNING *`,
-            [targetStatus, bookingId]
-        );
+        const alreadyConfirmed = currentStatus === 'confirmed' && targetStatus === 'confirmed';
+        const result = alreadyConfirmed
+            ? await query(`SELECT * FROM bookings WHERE id = $1 AND status IN ('pending', 'confirmed', 'modified')`, [bookingId])
+            : await query(
+                `UPDATE bookings SET status = $1, updated_at = NOW() WHERE id = $2 RETURNING *`,
+                [targetStatus, bookingId]
+            );
 
         if (result.rows.length === 0) {
             return res.json({ success: false, message: 'No booking found to update.', session_token: sessionToken });
@@ -1493,7 +1495,7 @@ router.post('/confirm', requireSessionToken, async (req, res) => {
                     }
                 }
                 // Notify customer
-                await notifyBooking({
+                if (!alreadyConfirmed) await notifyBooking({
                     type: 'confirm',
                     toEmail: confirmedBooking.contact_email,
                     toPhone: confirmedBooking.contact_phone,

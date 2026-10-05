@@ -206,6 +206,20 @@ export async function syncCalendarDeletions(token?: string) {
     return data as { checked: number; synced: Array<{ id: number; status: string; reason: string }>; errors: any[] };
 }
 
+export interface CalendarBookingSyncResponse {
+    checked: number;
+    synced: Array<{ id: number; status?: string }>;
+    skipped: Array<{ id: number; reason: string }>;
+    errors: Array<{ id?: number; error?: string; reason?: string }>;
+    enabled: boolean;
+}
+
+export async function syncCalendarBookings(token?: string): Promise<CalendarBookingSyncResponse> {
+    const headers = adminHeaders(token);
+    const { data } = await api.post<CalendarBookingSyncResponse>('/api/bookings/sync-calendar', { mode: 'bookings' }, { headers });
+    return data;
+}
+
 export async function patchBooking(id: number, payload: Record<string, any>, token?: string) {
     const headers = adminHeaders(token);
     const { data } = await api.patch(`/api/bookings/${id}`, payload, { headers });

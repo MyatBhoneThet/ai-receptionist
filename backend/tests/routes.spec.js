@@ -522,7 +522,8 @@ const query = jest.fn(async (sql, params = []) => {
   }
 
   if (
-    normalized.startsWith('select * from bookings where session_id = $1 and status in') &&
+    (normalized.startsWith('select * from bookings where session_id = $1 and status in') ||
+      normalized.startsWith('select id, status from bookings where session_id = $1 and status in')) &&
     !normalized.includes('($2 =')
   ) {
     const rows = state.bookings
@@ -631,6 +632,18 @@ const query = jest.fn(async (sql, params = []) => {
     return makeRows([...state.bookings].slice().reverse().slice(0, limit));
   }
 
+  if (normalized.startsWith('select * from bookings where status != \'cancelled\' order by updated_at desc')) {
+    const rows = state.bookings.filter((item) => item.status !== 'cancelled')
+      .sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at));
+    return makeRows(rows.slice(0, Number(params[0])));
+  }
+
+  if (normalized.startsWith('select * from bookings where google_event_id is not null')) {
+    const rows = state.bookings.filter((item) => item.google_event_id && item.status !== 'cancelled')
+      .sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at));
+    return makeRows(rows.slice(0, Number(params[0])));
+  }
+
   if (normalized.startsWith('update bookings set status = $1, updated_at = now() where id = $2 returning *')) {
     const row = state.bookings.find((item) => String(item.id) === String(params[1]));
     if (!row) return makeRows([]);
@@ -643,6 +656,7 @@ const query = jest.fn(async (sql, params = []) => {
     const row = state.bookings.find((item) => String(item.id) === String(params[0]));
     if (!row) return makeRows([]);
     row.status = 'cancelled';
+    if (normalized.includes('google_event_id = null')) row.google_event_id = null;
     row.updated_at = new Date();
     return makeRows([row]);
   }
@@ -755,7 +769,8 @@ await jest.unstable_mockModule('../middleware/rateLimiter.js', () => ({
 const { default: app } = await import('../index.js');
 const { createSessionToken } = await import('../middleware/auth.js');
 const { chat: mockChat } = await import('../services/llm.js');
-const { upsertEvent: mockUpsertEvent, isCalendarSyncEnabled: mockCalendarEnabled } = await import('../services/googleCalendar.js');
+const { upsertEvent: mockUpsertEvent, isCalendarSyncEnabled: mockCalendarEnabled,
+  getEventStatus: mockGetEventStatus } = await import('../services/googleCalendar.js');
 
 const runRoutes = process.env.NO_LISTEN !== 'true';
 
@@ -765,6 +780,7 @@ const runRoutes = process.env.NO_LISTEN !== 'true';
     mockChat.mockReset().mockResolvedValue(defaultChatResponse);
     mockUpsertEvent.mockReset().mockResolvedValue(null);
     mockCalendarEnabled.mockReset().mockReturnValue(true);
+    mockGetEventStatus.mockReset().mockResolvedValue({ available: true, reason: 'found' });
     process.env.STAFF_WEBHOOK_URL = '';
     process.env.STAFF_ALERT_EMAIL = '';
     process.env.STAFF_WEBHOOK_PROVIDER = 'slack';
@@ -1113,6 +1129,188 @@ const runRoutes = process.env.NO_LISTEN !== 'true';
     expect(auditRes.status).toBe(200);
     expect(auditRes.body.length).toBeGreaterThan(0);
     expect(auditRes.body.every((row) => row.entity === 'booking')).toBe(true);
+  });
+
+  describe('manual Google Calendar repair', () => {
+    beforeEach(() => {
+      query.mockClear();
+    });
+
+    function sync(body = { mode: 'bookings' }) {
+      return request(app).post('/api/bookings/sync-calendar')
+        .set('X-Admin-Token', 'admin-secret').send(body);
+    }
+
+    function fixture(overrides) {
+      return { ...makeInitialBookings()[1], ...overrides };
+    }
+
+    function bookingWrites() {
+      return query.mock.calls.filter(([sql]) => normalizeSql(sql).startsWith('update bookings'));
+    }
+
+    it('exports missing events and repairs existing events while skipping unconfirmed and genuine waitlist reservations', async () => {
+      const rawDate = new Date('2026-10-06T17:00:00Z');
+      state.bookings = [
+        fixture({ id: 20, google_event_id: null }),
+        fixture({ id: 21, status: 'modified', date: rawDate, google_event_id: 'stale-event' }),
+        fixture({ id: 22, status: 'pending', waitlisted: true, google_event_id: 'legacy-event' }),
+        fixture({ id: 23, waitlisted: true, google_event_id: null }),
+        fixture({ id: 24, status: 'pending', google_event_id: null }),
+        fixture({ id: 25, status: 'cancelled', google_event_id: 'cancelled-event' }),
+      ];
+      mockUpsertEvent.mockImplementation(async (booking) => booking.google_event_id || `created-event-${booking.id}`);
+
+      const response = await sync();
+
+      expect(response.status).toBe(200);
+      expect(response.body).toEqual({
+        enabled: true, checked: 5,
+        synced: [{ id: 20, status: 'synced' }, { id: 21, status: 'synced' }, { id: 22, status: 'synced' }],
+        skipped: [{ id: 23, reason: 'waitlisted' }, { id: 24, reason: 'not_confirmed' }],
+        errors: [],
+      });
+      expect(mockUpsertEvent).toHaveBeenCalledTimes(3);
+      expect(mockUpsertEvent).toHaveBeenCalledWith(expect.objectContaining({ id: 21, date: rawDate, google_event_id: 'stale-event' }));
+      expect(state.bookings.find((booking) => booking.id === 20).google_event_id).toBe('created-event-20');
+      expect(state.bookings.map((booking) => booking.status)).toEqual(['confirmed', 'modified', 'pending', 'confirmed', 'pending', 'cancelled']);
+      expect(bookingWrites()).toHaveLength(1);
+      expect(normalizeSql(bookingWrites()[0][0])).toBe('update bookings set google_event_id = $1 where id = $2');
+      expect(mockGetEventStatus).not.toHaveBeenCalled();
+    });
+
+    it('persists the replacement event ID without cancelling a booking whose event was deleted', async () => {
+      state.bookings = [fixture({ id: 20, status: 'modified', google_event_id: 'deleted-event' })];
+      mockUpsertEvent.mockResolvedValue('replacement-event');
+
+      const response = await sync();
+
+      expect(response.body.synced).toEqual([{ id: 20, status: 'synced' }]);
+      expect(state.bookings[0]).toEqual(expect.objectContaining({ status: 'modified', google_event_id: 'replacement-event' }));
+      expect(bookingWrites()).toHaveLength(1);
+      expect(mockGetEventStatus).not.toHaveBeenCalled();
+    });
+
+    it('reports Calendar failures and retains saved statuses and existing event IDs', async () => {
+      state.bookings = [
+        fixture({ id: 20, status: 'modified', google_event_id: 'existing-event' }),
+        fixture({ id: 21, google_event_id: null }),
+      ];
+      mockUpsertEvent.mockResolvedValueOnce(null).mockRejectedValueOnce(new Error('Permission denied'));
+
+      const response = await sync();
+
+      expect(response.status).toBe(200);
+      expect(response.body.checked).toBe(2);
+      expect(response.body.synced).toEqual([]);
+      expect(response.body.errors).toEqual([
+        { id: 20, error: 'Google Calendar could not be updated.' },
+        { id: 21, error: 'Permission denied' },
+      ]);
+      expect(state.bookings[0]).toEqual(expect.objectContaining({ status: 'modified', google_event_id: 'existing-event' }));
+      expect(state.bookings[1]).toEqual(expect.objectContaining({ status: 'confirmed', google_event_id: null }));
+      expect(bookingWrites()).toHaveLength(0);
+    });
+
+    it('returns disabled without reading or changing bookings when Calendar credentials are missing', async () => {
+      mockCalendarEnabled.mockReturnValue(false);
+
+      const response = await sync();
+
+      expect(response.status).toBe(200);
+      expect(response.body).toEqual({ enabled: false, checked: 0, synced: [], skipped: [], errors: [] });
+      expect(query).not.toHaveBeenCalled();
+      expect(mockUpsertEvent).not.toHaveBeenCalled();
+    });
+
+    it('rejects unknown sync modes before any database or Calendar operations', async () => {
+      const response = await sync({ mode: 'unknown' });
+
+      expect(response.status).toBe(400);
+      expect(query).not.toHaveBeenCalled();
+      expect(mockUpsertEvent).not.toHaveBeenCalled();
+      expect(mockGetEventStatus).not.toHaveBeenCalled();
+    });
+
+    it('preserves explicit deletion import for missing Calendar events', async () => {
+      state.bookings = [fixture({ id: 20, google_event_id: 'missing-event' })];
+      mockGetEventStatus.mockResolvedValue({ available: false, reason: 'missing' });
+
+      const response = await sync({ mode: 'deletions' });
+
+      expect(response.status).toBe(200);
+      expect(response.body).toEqual({ checked: 1, synced: [{ id: 20, status: 'cancelled', reason: 'missing' }], errors: [] });
+      expect(state.bookings[0]).toEqual(expect.objectContaining({ status: 'cancelled', google_event_id: null }));
+      expect(mockUpsertEvent).not.toHaveBeenCalled();
+    });
+
+    it('keeps deletion import as the legacy default and retains records when Calendar status is unavailable', async () => {
+      state.bookings = [fixture({ id: 20, google_event_id: 'existing-event' })];
+      mockGetEventStatus.mockResolvedValue({ available: null, reason: 'unavailable', error: 'Permission denied' });
+
+      const response = await sync({});
+
+      expect(response.status).toBe(200);
+      expect(response.body).toEqual({ checked: 1, synced: [], errors: [{ id: 20, google_event_id: 'existing-event', error: 'Permission denied' }] });
+      expect(state.bookings[0]).toEqual(expect.objectContaining({ status: 'confirmed', google_event_id: 'existing-event' }));
+      expect(bookingWrites()).toHaveLength(0);
+      expect(mockUpsertEvent).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Google Calendar confirmation retries', () => {
+    beforeEach(() => {
+      query.mockClear();
+    });
+
+    function confirm() {
+      return request(app).post('/api/chat/confirm')
+        .set('X-Session-Id', 'sess-2').set('X-Session-Token', createSessionToken('sess-2'))
+        .send({ session_id: 'sess-2', action: 'confirm' });
+    }
+
+    function statusWrites() {
+      return query.mock.calls.filter(([sql]) => /^update bookings set status/.test(normalizeSql(sql)));
+    }
+
+    it('retries the same event for an already confirmed reservation without changing status or notifying twice', async () => {
+      state.bookings[1].google_event_id = 'existing-event';
+      mockUpsertEvent.mockResolvedValue('existing-event');
+
+      const response = await confirm();
+
+      expect(response.status).toBe(200);
+      expect(response.body).toEqual(expect.objectContaining({ success: true, booking_id: 2, calendar_sync: { status: 'synced' } }));
+      expect(mockUpsertEvent).toHaveBeenCalledWith(expect.objectContaining({ id: 2, status: 'confirmed', google_event_id: 'existing-event' }));
+      expect(statusWrites()).toHaveLength(0);
+      expect(query.mock.calls.some(([sql]) => normalizeSql(sql).includes('from app_settings'))).toBe(false);
+      expect(state.bookings[1].status).toBe('confirmed');
+    });
+
+    it('creates a missing event on retry without writing the confirmed status again', async () => {
+      mockUpsertEvent.mockResolvedValue('created-on-retry');
+
+      const response = await confirm();
+
+      expect(response.body.calendar_sync).toEqual({ status: 'synced' });
+      expect(state.bookings[1].google_event_id).toBe('created-on-retry');
+      expect(state.bookings[1].status).toBe('confirmed');
+      expect(statusWrites()).toHaveLength(0);
+      expect(query.mock.calls.some(([sql]) => normalizeSql(sql).includes('from app_settings'))).toBe(false);
+    });
+
+    it.each(['existing-event', null])('retains the confirmed reservation and its %s event ID when a retry fails', async (eventId) => {
+      state.bookings[1].google_event_id = eventId;
+      mockUpsertEvent.mockResolvedValue(null);
+
+      const response = await confirm();
+
+      expect(response.body).toEqual(expect.objectContaining({ success: true, calendar_sync: { status: 'failed' } }));
+      expect(response.body.message).toContain('could not be updated');
+      expect(state.bookings[1]).toEqual(expect.objectContaining({ status: 'confirmed', google_event_id: eventId }));
+      expect(statusWrites()).toHaveLength(0);
+      expect(query.mock.calls.filter(([sql]) => normalizeSql(sql).startsWith('update bookings'))).toHaveLength(0);
+    });
   });
 
   it('keeps reservation changes in edit mode instead of repeating the lookup', async () => {
@@ -2394,6 +2592,41 @@ const runRoutes = process.env.NO_LISTEN !== 'true';
       expect(response.body.data.calendar_sync).toEqual({ status: 'failed' });
       expect(response.body.message).toContain('Google Calendar could not be updated');
       expect(response.body.message).not.toContain('Google Calendar has been updated');
+    });
+
+    it.each(['confirmed', 'modified'])('updates an existing Calendar event when a legacy %s reservation retains its waitlist flag', async (status) => {
+      Object.assign(state.bookings.find((booking) => booking.id === 50), { status, waitlisted: true });
+      await openReservationSlip();
+
+      const response = await change('Move the date to tomorrow');
+
+      expect(response.status).toBe(200);
+      expect(response.body.data).toEqual(expect.objectContaining({
+        date: '06-10-2026', waitlisted: true, status: 'modified', calendar_sync: { status: 'synced' },
+      }));
+      expect(response.body.message).toContain('Google Calendar has been updated');
+      expect(response.body.message).not.toContain('remains on the waitlist');
+      expect(mockUpsertEvent).toHaveBeenCalledWith(expect.objectContaining({
+        id: 50, date: '2026-10-06', google_event_id: 'existing-calendar-event', waitlisted: true,
+      }));
+    });
+
+    it('saves a genuine waitlist change without creating a Calendar event or claiming a sync', async () => {
+      Object.assign(state.bookings.find((booking) => booking.id === 50), {
+        status: 'pending', waitlisted: true, google_event_id: null,
+      });
+      await openReservationSlip();
+
+      const response = await change('Move the date to tomorrow');
+
+      expect(response.status).toBe(200);
+      expect(response.body.data).toEqual(expect.objectContaining({
+        date: '06-10-2026', waitlisted: true, status: 'pending', calendar_sync: { status: 'not_required' },
+      }));
+      expect(response.body.message).toContain('remains on the waitlist');
+      expect(response.body.message).not.toContain('Google Calendar has been updated');
+      expect(mockUpsertEvent).not.toHaveBeenCalled();
+      expect(state.bookings.find((booking) => booking.id === 50).google_event_id).toBeNull();
     });
 
     it('reports disabled Calendar sync without attempting an API call', async () => {
