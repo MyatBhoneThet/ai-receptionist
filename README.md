@@ -61,6 +61,7 @@ Copy [`.env.example`](/Users/myatbhonethet/Downloads/AI-Receptionist/.env.exampl
 ```env
 DATABASE_URL=postgres_url
 GROQ_API_KEY=groq_key
+GROQ_MODEL=openai/gpt-oss-120b
 PORT=4000
 FRONTEND_URL=http://localhost:3000
 SESSION_SIGNING_SECRET=long_random_secret
@@ -86,6 +87,13 @@ STAFF_ALERT_EMAIL=
 STAFF_WEBHOOK_URL=
 STAFF_WEBHOOK_PROVIDER=slack
 ```
+
+`GROQ_MODEL` is optional and defaults to `openai/gpt-oss-120b`. Set it in
+`backend/.env` for local development or your backend host's environment settings
+to select another Groq model that supports JSON mode. The former default,
+`llama-3.3-70b-versatile`, was retired for free and developer accounts on August 16,
+2026; see [Groq's deprecation notice](https://console.groq.com/docs/deprecations).
+Restart or redeploy the backend after changing environment variables.
 
 ### 3. Install Dependencies
 ```bash

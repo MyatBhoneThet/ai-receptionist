@@ -18,6 +18,9 @@ function formatDate(date) {
 }
 
 export async function chat(history, userMessage, today, state = {}, customerContext = "") {
+    const model = process.env.GROQ_MODEL?.trim() || 'openai/gpt-oss-120b';
+    const isGptOss = ['openai/gpt-oss-120b', 'openai/gpt-oss-20b'].includes(model);
+
     // Minimal state (token-efficient) - Ensure all dates are strings
     const minimalState = {
         service_type: state?.service_type || "",
@@ -57,12 +60,14 @@ export async function chat(history, userMessage, today, state = {}, customerCont
 
     try {
         const { data: completion, response } = await groq.chat.completions.create({
-            model: 'llama-3.3-70b-versatile',
+            model,
 
             messages,
 
             temperature: 0.08,
-            max_tokens: 500,
+            // Allow room for reasoning as well as the receptionist's JSON response.
+            max_completion_tokens: 2048,
+            ...(isGptOss ? { reasoning_effort: 'low', include_reasoning: false } : {}),
 
             response_format: { type: 'json_object' },
         }).withResponse();
