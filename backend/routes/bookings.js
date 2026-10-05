@@ -1,6 +1,6 @@
 import express from 'express';
 import { query } from '../services/db.js';
-import { upsertEvent, cancelEvent, getEventStatus } from '../services/googleCalendar.js';
+import { upsertEvent, cancelEvent, getEventStatus, isCalendarSyncEnabled } from '../services/googleCalendar.js';
 import { bookingsLimiter } from '../middleware/rateLimiter.js';
 import { requireAdminToken, requireSessionToken } from '../middleware/auth.js';
 import { notifyBooking } from '../services/notifications.js';
@@ -226,12 +226,15 @@ router.patch('/:id', requireAdminToken, async (req, res) => {
             return res.status(404).json({ error: 'Booking not found.' });
         }
 
-        const updatedBooking = serializeBooking(result.rows[0]);
+        const rawBooking = result.rows[0];
+        const updatedBooking = serializeBooking(rawBooking);
+        let calendarSync;
         if (updatedBooking.status === 'cancelled') {
             await cancelCalendarEventForBooking(updatedBooking);
             await promoteWaitlist({ service_type: updatedBooking.service_type, date: updatedBooking.date });
         } else {
-            const eventId = await upsertEvent(updatedBooking);
+            const eventId = await upsertEvent(rawBooking);
+            calendarSync = { status: eventId ? 'synced' : (isCalendarSyncEnabled() ? 'failed' : 'disabled') };
             if (eventId && eventId !== updatedBooking.google_event_id) {
                 await query('UPDATE bookings SET google_event_id = $1 WHERE id = $2', [eventId, updatedBooking.id]);
                 updatedBooking.google_event_id = eventId;
@@ -257,7 +260,7 @@ router.patch('/:id', requireAdminToken, async (req, res) => {
             afterState:  updatedBooking,
         });
 
-        res.json(updatedBooking);
+        res.json({ ...updatedBooking, ...(calendarSync ? { calendar_sync: calendarSync } : {}) });
     } catch (err) {
         console.error('[PATCH /api/bookings] Error:', err);
         res.status(500).json({ error: 'Failed to update booking.' });
@@ -317,12 +320,15 @@ router.post('/:id/status', requireAdminToken, async (req, res) => {
         if (result.rows.length === 0) {
             return res.status(404).json({ error: 'Booking not found.' });
         }
-        const booking = serializeBooking(result.rows[0]);
+        const rawBooking = result.rows[0];
+        const booking = serializeBooking(rawBooking);
+        let calendarSync;
         if (status === 'cancelled') {
             await cancelCalendarEventForBooking(booking);
             await promoteWaitlist({ service_type: booking.service_type, date: booking.date });
-        } else if (status === 'confirmed') {
-            const eventId = await upsertEvent(booking);
+        } else if (status === 'confirmed' || status === 'modified') {
+            const eventId = await upsertEvent(rawBooking);
+            calendarSync = { status: eventId ? 'synced' : (isCalendarSyncEnabled() ? 'failed' : 'disabled') };
             if (eventId && eventId !== booking.google_event_id) {
                 await query('UPDATE bookings SET google_event_id = $1 WHERE id = $2', [eventId, booking.id]);
                 booking.google_event_id = eventId;
@@ -336,7 +342,7 @@ router.post('/:id/status', requireAdminToken, async (req, res) => {
             beforeState,
             afterState:  booking,
         });
-        return res.json(booking);
+        return res.json({ ...booking, ...(calendarSync ? { calendar_sync: calendarSync } : {}) });
     } catch (err) {
         console.error('[POST /api/bookings/:id/status] Error:', err);
         return res.status(500).json({ error: 'Failed to update status.' });

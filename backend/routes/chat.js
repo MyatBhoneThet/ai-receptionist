@@ -2,13 +2,17 @@ import express from 'express';
 import { chat } from '../services/llm.js';
 import { validateBookingResponse } from '../validation/bookingSchema.js';
 import { query } from '../services/db.js';
-import { upsertEvent } from '../services/googleCalendar.js';
+import { upsertEvent, isCalendarSyncEnabled } from '../services/googleCalendar.js';
 import { chatLimiter } from '../middleware/rateLimiter.js';
 import { createSessionToken, requireSessionToken } from '../middleware/auth.js';
 import { notifyBooking } from '../services/notifications.js';
 import { findUserByEmail, verifyAccessToken } from '../services/auth.js';
 import { checkAvailability, findAlternativeAvailability, findDuplicateBooking } from '../services/availability.js';
 import { formatDisplayDateValue } from '../services/dateOnly.js';
+import {
+    calendarToday, bookingDateKey, addBookingDays,
+    bookingStayDays, extractNaturalBookingDate, hasBookingDateExpression,
+} from '../services/bookingDates.js';
 
 const router = express.Router();
 
@@ -19,11 +23,7 @@ router.use(chatLimiter);
 const sessionState = new Map();
 
 function getTodayFormatted() {
-    const now = new Date();
-    const dd = String(now.getDate()).padStart(2, '0');
-    const mm = String(now.getMonth() + 1).padStart(2, '0');
-    const yyyy = now.getFullYear();
-    return `${dd}-${mm}-${yyyy}`;
+    return calendarToday();
 }
 
 function normalizeDate(input) {
@@ -35,11 +35,7 @@ function normalizeDate(input) {
 }
 
 function parseDate(ddmmyyyy) {
-    if (!ddmmyyyy) return null;
-    if (/^\d{4}-\d{2}-\d{2}$/.test(ddmmyyyy)) return ddmmyyyy;
-    const [dd, mm, yyyy] = ddmmyyyy.split('-');
-    if (!dd || !mm || !yyyy) return null;
-    return `${yyyy}-${mm}-${dd}`;
+    return bookingDateKey(ddmmyyyy);
 }
 
 function formatDate(date) {
@@ -50,84 +46,15 @@ function normalizeBooking(booking) {
     if (!booking) return booking;
     return {
         ...booking,
+        phone_number: booking.contact_phone ?? booking.phone_number ?? '',
         date: formatDate(booking.date),
         end_date: formatDate(booking.end_date),
         // Ensure times are trimmed/formatted if needed, but usually they are OK strings
     };
 }
 
-function formatDisplayDate(date) {
-    const dd = String(date.getDate()).padStart(2, '0');
-    const mm = String(date.getMonth() + 1).padStart(2, '0');
-    const yyyy = date.getFullYear();
-    return `${dd}-${mm}-${yyyy}`;
-}
-
-function parseToday(todayFormatted) {
-    const [dd, mm, yyyy] = todayFormatted.split('-').map(Number);
-    return new Date(yyyy, mm - 1, dd);
-}
-
-function toDisplayDate(value) {
-    if (!value) return '';
-    if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-        const [yyyy, mm, dd] = value.split('-');
-        return `${dd}-${mm}-${yyyy}`;
-    }
-    const slashMatch = value.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
-    if (slashMatch) {
-        const [, dd, mm, yyyy] = slashMatch;
-        return `${dd.padStart(2, '0')}-${mm.padStart(2, '0')}-${yyyy}`;
-    }
-    return value;
-}
-
 function addDaysDisplay(displayDate, days) {
-    const dbDate = parseDate(displayDate);
-    if (!dbDate) return '';
-    const [yyyy, mm, dd] = dbDate.split('-').map(Number);
-    const date = new Date(yyyy, mm - 1, dd);
-    date.setDate(date.getDate() + days);
-    return formatDisplayDate(date);
-}
-
-function resolveOrdinalDate(day, monthHint, todayFormatted) {
-    const today = parseToday(todayFormatted);
-    const candidate = new Date(today.getFullYear(), today.getMonth(), day);
-
-    if (monthHint === 'next') {
-        candidate.setMonth(today.getMonth() + 1);
-    } else if (!monthHint && day < today.getDate()) {
-        candidate.setMonth(today.getMonth() + 1);
-    }
-
-    if (candidate.getDate() !== day) return '';
-    return formatDisplayDate(candidate);
-}
-
-const WEEKDAY_INDEX = {
-    sunday: 0,
-    monday: 1,
-    tuesday: 2,
-    wednesday: 3,
-    thursday: 4,
-    friday: 5,
-    saturday: 6,
-};
-
-function resolveWeekdayDate(weekdayName, modifier, todayFormatted) {
-    const today = parseToday(todayFormatted);
-    const target = WEEKDAY_INDEX[weekdayName];
-    if (target === undefined) return '';
-
-    let daysAhead = (target - today.getDay() + 7) % 7;
-    if (modifier === 'next' || daysAhead === 0) {
-        daysAhead += 7;
-    }
-
-    const candidate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-    candidate.setDate(candidate.getDate() + daysAhead);
-    return formatDisplayDate(candidate);
+    return addBookingDays(displayDate, days);
 }
 
 function extractStayLengthDays(message) {
@@ -280,66 +207,102 @@ function normalizeEditValue(value) {
     return String(value || '').trim().replace(/\s+/g, ' ');
 }
 
+const PEOPLE_WORDS = {
+    one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8,
+    nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14,
+    fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19, twenty: 20,
+};
+const PEOPLE_PATTERN = `(?:\\d{1,3}|${Object.keys(PEOPLE_WORDS).join('|')})`;
+
 function detectModifyField(message) {
     const text = normalizeEditValue(message).toLowerCase();
-
     if (!text) return null;
-    if (/\b(date|day)\b/i.test(text)) return 'date';
-    if (/\b(time|schedule|hour|hours)\b/i.test(text)) return 'start_time';
-    if (/\b(name|guest name|reservation name)\b/i.test(text)) return 'reservation_name';
-    if (/\b(guest|guests|people|party size|party)\b/i.test(text)) return 'people';
-    if (/\b(room|venue|table)\b/i.test(text)) return 'notes';
-    if (/\b(notes?|special requests?)\b/i.test(text)) return 'notes';
-
+    if (/\b(check[ -]?out|departure)\b/.test(text)) return 'end_date';
+    if (hasBookingDateExpression(text) || /\bday\b/.test(text)) return 'date';
+    if (/\b(time|schedule|hour|hours)\b/.test(text)) return 'start_time';
+    if (/\b(phone|telephone|mobile|contact number)\b/.test(text)) return 'contact_phone';
+    if (/\b(name|guest name|reservation name)\b/.test(text)) return 'reservation_name';
+    if (/\b(guest|guests|people|party size|party)\b/.test(text)) return 'people';
+    if (/\b(room|venue|table|notes?|special requests?)\b/.test(text)) return 'notes';
     return null;
 }
 
-function extractModifyValue(field, message) {
+function extractModifyValue(field, message, today, allowBare = false) {
     const text = normalizeEditValue(message);
-    const lower = text.toLowerCase();
-
     if (!text) return null;
-
-    if (field === 'date') {
-        const dateMatch = text.match(/\b(\d{1,2}[/-]\d{1,2}[/-]\d{4}|\d{4}-\d{2}-\d{2})\b/);
-        if (!dateMatch) return null;
-        return normalizeDate(dateMatch[1]);
-    }
-
+    if (field === 'date' || field === 'end_date') return extractNaturalBookingDate(text, today) || null;
     if (field === 'start_time') {
-        const timeMatch = text.match(/\b(\d{1,2}:\d{2})(?::\d{2})?\b/);
-        if (!timeMatch) return null;
-        const [hours, minutes] = timeMatch[1].split(':');
-        return `${hours.padStart(2, '0')}:${minutes.padStart(2, '0')}:00`;
+        // Keep HH:MM workflows and accept the common spoken form "9pm".
+        const clock = text.match(/\b(\d{1,2})(?::(\d{2}))(?::\d{2})?\s*(am|pm)?\b/i)
+            || text.match(/\b(\d{1,2})\s*(am|pm)\b/i);
+        if (!clock) return null;
+        let hours = Number(clock[1]);
+        const shortClock = !clock[3] && /^(am|pm)$/i.test(clock[2] || '');
+        const minutes = shortClock ? 0 : Number(clock[2] || 0);
+        const suffix = (shortClock ? clock[2] : clock[3])?.toLowerCase();
+        if (minutes > 59 || hours > (suffix ? 12 : 23) || hours < (suffix ? 1 : 0)) return null;
+        if (suffix) hours = (hours % 12) + (suffix === 'pm' ? 12 : 0);
+        return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:00`;
     }
-
     if (field === 'people') {
-        const peopleMatch = text.match(/\b(\d{1,2})\b/);
-        if (!peopleMatch) return null;
-        return Number(peopleMatch[1]);
+        const match = text.toLowerCase().match(new RegExp(`\\b(${PEOPLE_PATTERN})\\s+(?:guests?|people|persons?|adults?|pax)\\b`))
+            || text.toLowerCase().match(new RegExp(`\\b(?:guests?|people|party(?: size)?)\\s*(?:count|number)?\\s*(?:is|to|for|of|:)?\\s*(${PEOPLE_PATTERN})\\b`));
+        const bare = text.toLowerCase().replace(/^(?:actually |(?:make it|set it to|set to|change it to|change to|to|for)\s+)/, '');
+        const value = match?.[1] || (allowBare && new RegExp(`^${PEOPLE_PATTERN}$`).test(bare) ? bare : null);
+        const count = PEOPLE_WORDS[value] || Number(value);
+        return value && Number.isInteger(count) && count > 0 ? count : null;
     }
-
+    if (field === 'contact_phone') {
+        const match = text.match(/\b(?:phone(?: number)?|telephone|mobile(?: number)?|contact(?: phone| number)?)\s*(?:is|into|to|as|will be|should be|would be|:|=)?\s*(?:the\s+)?(\+?\d[\d ()-]{5,}\d)/i);
+        const value = match?.[1] || (allowBare && /^\+?[\d ()-]+$/.test(text) ? text : null);
+        if (!value) return null;
+        const digits = value.replace(/\D/g, '');
+        return digits.length >= 7 && digits.length <= 15 ? `${value.startsWith('+') ? '+' : ''}${digits}` : null;
+    }
     if (field === 'reservation_name' || field === 'notes') {
-        const stripped = lower
-            .replace(/^(change|update|make it|set it to|set to|to|new)\s+/i, '')
-            .replace(/^(new\s+)?(name|notes?)\s+(is|to|as)\s+/i, '')
-            .replace(/^(the )?(name|notes?)\s+(to|as)\s+/i, '')
-            .trim();
-
-        if (!stripped || stripped === field || stripped === 'name' || stripped === 'notes') {
-            return null;
-        }
-
-        return text;
+        const label = field === 'reservation_name' ? '(?:reservation |guest )?name' : '(?:notes?|special requests?)';
+        const match = text.match(new RegExp(`\\b${label}\\s+(?:(?:is|to|as)\\s+)?(.+?)(?=\\s+(?:and|with|phone|contact|on)\\b|[.!?]|$)`, 'i'));
+        const value = match?.[1] || (allowBare ? text.replace(/^(?:change|update|make it|set it to|set to|to|new)\s+/i, '') : null);
+        return value && !/^(?:name|notes?|room|venue|table)$/i.test(value) ? value.trim() : null;
     }
-
     return null;
+}
+
+function extractModifyChanges(message, today, state) {
+    const changes = { ...(state.modify_updates || {}) };
+    const missing = [];
+    const checkout = message.match(/\b(?:check[ -]?out|departure)(?: date)?\b/i);
+    const awaitingCheckout = state.modify_step === 'awaiting_value' && state.modify_field === 'end_date' && !checkout;
+    const arrivalText = awaitingCheckout ? '' : checkout ? message.slice(0, checkout.index) : message;
+    const fields = ['date', 'end_date', 'start_time', 'people', 'contact_phone', 'reservation_name', 'notes'];
+    const cues = {
+        date: hasBookingDateExpression(arrivalText) || /\bday\b/i.test(arrivalText),
+        end_date: Boolean(checkout),
+        start_time: /\b(time|schedule|hours?)\b|\b\d{1,2}:\d{2}\b|\b\d{1,2}\s*(?:am|pm)\b/i.test(message),
+        people: /\b(?:guests?(?! name)|people|party(?: size)?|persons?|pax)\b/i.test(message),
+        contact_phone: /\b(phone|telephone|mobile|contact number)\b/i.test(message),
+        reservation_name: /\b(?:reservation |guest )?name\b/i.test(message),
+        notes: /\b(notes?|special requests?)\b/i.test(message),
+    };
+    for (const field of fields) {
+        const allowBare = state.modify_step === 'awaiting_value' && state.modify_field === field;
+        if (!cues[field] && !allowBare) continue;
+        const input = field === 'date' ? arrivalText : field === 'end_date' ? message.slice(checkout?.index || 0) : message;
+        const value = extractModifyValue(field, input, today, allowBare);
+        if (value === null || value === '') missing.push(field);
+        else changes[field] = value;
+    }
+    return { changes, missing };
 }
 
 function buildModifyPrompt(field) {
     switch (field) {
         case 'date':
-            return 'What date would you like instead? Please reply in DD-MM-YYYY.';
+            return 'What date would you like instead? You can say tomorrow or seventh October this year, or use DD-MM-YYYY.';
+        case 'end_date':
+            return 'What check-out date would you like instead?';
+        case 'contact_phone':
+            return 'What phone number should I use instead?';
         case 'start_time':
             return 'What time would you like instead? Please reply in HH:MM.';
         case 'reservation_name':
@@ -403,70 +366,14 @@ function inferServiceTypeFromMessage(text) {
 }
 
 function extractLookupDate(message, todayFormatted) {
-    const text = normalizeEditValue(message);
-    const directMatch = text.match(/\b(\d{4}-\d{2}-\d{2})\b/);
-    if (directMatch) return toDisplayDate(directMatch[1]);
-
-    const fullDateMatch = text.match(/\b(\d{1,2}[/-]\d{1,2}[/-]\d{4})\b/);
-    if (fullDateMatch) return toDisplayDate(fullDateMatch[1]);
-
-    const dayMatch = text.match(/\b(?:on\s+)?(\d{1,2})(?:st|nd|rd|th)?\b/i);
-    if (!dayMatch) return '';
-
-    const [todayDay, todayMonth, todayYear] = todayFormatted.split('-').map(Number);
-    const day = Number(dayMatch[1]);
-    if (!Number.isFinite(day) || day < 1 || day > 31) return '';
-
-    const candidate = new Date(todayYear, todayMonth - 1, day);
-    if (candidate.getMonth() !== todayMonth - 1) return '';
-
-    if (day < todayDay) {
-        candidate.setMonth(candidate.getMonth() + 1);
-    }
-
-    const dd = String(candidate.getDate()).padStart(2, '0');
-    const mm = String(candidate.getMonth() + 1).padStart(2, '0');
-    const yyyy = candidate.getFullYear();
-    return `${dd}-${mm}-${yyyy}`;
+    const date = extractNaturalBookingDate(message, todayFormatted);
+    if (date || hasBookingDateExpression(message)) return date;
+    const dayMatch = normalizeEditValue(message).match(/\b(?:on\s+)?(\d{1,2})\b/i);
+    return dayMatch ? extractNaturalBookingDate(`${dayMatch[1]}th`, todayFormatted) : '';
 }
 
 function extractBookingDate(message, todayFormatted) {
-    const text = normalizeEditValue(message);
-    const directMatch = text.match(/\b(\d{4}-\d{2}-\d{2})\b/);
-    if (directMatch) return toDisplayDate(directMatch[1]);
-
-    const slashMatch = text.match(/\b(\d{1,2}[/-]\d{1,2}[/-]\d{4})\b/);
-    if (slashMatch) return toDisplayDate(slashMatch[1]);
-
-    if (/\bday\s+after\s+tomorrow\b/i.test(text)) {
-        return addDaysDisplay(todayFormatted, 2);
-    }
-
-    if (/\btomorrow\b/i.test(text)) {
-        return addDaysDisplay(todayFormatted, 1);
-    }
-
-    if (/\btoday\b/i.test(text)) {
-        return todayFormatted;
-    }
-
-    const weekdayMatch = text.match(/\b(?:(this|next)\s+)?(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/i);
-    if (weekdayMatch) {
-        return resolveWeekdayDate(weekdayMatch[2].toLowerCase(), weekdayMatch[1]?.toLowerCase(), todayFormatted);
-    }
-
-    const nextMonthBeforeMatch = text.match(/\bnext\s+month\s+(?:on\s+)?(\d{1,2})(?:st|nd|rd|th)?\b/i);
-    if (nextMonthBeforeMatch) {
-        return resolveOrdinalDate(Number(nextMonthBeforeMatch[1]), 'next', todayFormatted);
-    }
-
-    const ordinalMatch = text.match(/\b(?:on\s+)?(\d{1,2})(?:(?:st|nd|rd|th)(?:\s+(this|next)\s+month)?|\s+(this|next)\s+month)\b/i);
-    if (!ordinalMatch) return '';
-
-    const day = Number(ordinalMatch[1]);
-    if (!Number.isFinite(day) || day < 1 || day > 31) return '';
-
-    return resolveOrdinalDate(day, (ordinalMatch[2] || ordinalMatch[3])?.toLowerCase(), todayFormatted);
+    return extractNaturalBookingDate(message, todayFormatted);
 }
 
 function extractExplicitBookingDates(message, todayFormatted) {
@@ -522,7 +429,7 @@ async function findBookingForLookup(session_id, criteria) {
            AND ($3 = '' OR date = NULLIF($3, '')::date)
            AND ($4 = '' OR LOWER(reservation_name) = LOWER($4))
          ORDER BY created_at DESC LIMIT 1`,
-        [session_id, criteria.service_type || '', criteria.date || '', criteria.reservation_name || '']
+        [session_id, criteria.service_type || '', parseDate(criteria.date) || '', criteria.reservation_name || '']
     );
 
     return result.rows[0] || null;
@@ -631,7 +538,18 @@ router.post('/', async (req, res) => {
             sessionState.set(session_id, state);
         }
 
-        if (isReservationLookup(normalizedMessage) || wantsExistingReservationChange(normalizedMessage)) {
+        if (wantsExistingReservationChange(normalizedMessage) && (state.edit_booking_id || state.id)
+            && !isReservationLookup(normalizedMessage)) {
+            state = {
+                ...state,
+                modify_mode: 'modify_booking',
+                modify_step: state.modify_step || 'choose_field',
+                edit_booking_id: state.edit_booking_id || state.id,
+            };
+        }
+
+        if (isReservationLookup(normalizedMessage)
+            || (wantsExistingReservationChange(normalizedMessage) && !state.edit_booking_id)) {
             const lookupCriteria = extractLookupCriteria(normalizedMessage, today);
             const hasLookupCriteria = Boolean(
                 lookupCriteria.date || lookupCriteria.service_type || lookupCriteria.reservation_name
@@ -724,7 +642,7 @@ router.post('/', async (req, res) => {
             sessionState.set(session_id, state);
         }
 
-        if (wantsReservationSlip(normalizedMessage)) {
+        if (wantsReservationSlip(normalizedMessage) && !wantsExistingReservationChange(normalizedMessage)) {
             const latestBooking = state.edit_booking_id || state.id
                 ? state
                 : normalizeBooking(await loadLatestSessionBooking(session_id));
@@ -816,7 +734,7 @@ router.post('/', async (req, res) => {
                     };
                     sessionState.set(session_id, state);
 
-                    const msg = `I've found your ${booking.service_type} reservation for ${state.date} under the name "${booking.reservation_name}". What would you like to change? You can say date, time, guests, notes, or name.`;
+                    const msg = `I've found your ${booking.service_type} reservation for ${state.date} under the name "${booking.reservation_name}". What would you like to change? You can say date, time, guests, phone number, notes, or name.`;
                     await saveConversation(session_id, message, msg);
                     return res.json({
                         intent: 'modify_booking',
@@ -844,161 +762,115 @@ router.post('/', async (req, res) => {
                 });
             }
 
-            const requestedField = state.modify_step === 'choose_field'
-                ? detectModifyField(normalizedMessage)
-                : state.modify_field;
-
-            if (state.modify_step === 'choose_field') {
-                if (!requestedField) {
-                    const msg = 'What would you like to change? You can say date, time, guests, notes, or name.';
-                    await saveConversation(session_id, message, msg);
-                    return res.json({
-                        intent: 'modify_booking',
-                        message: msg,
-                        speak: msg,
-                        data: state,
-                        missing_fields: [],
-                        confidence: 1,
-                        session_token: sessionToken,
-                    });
-                }
-
+            const { changes, missing } = extractModifyChanges(normalizedMessage, today, state);
+            const requestedField = detectModifyField(normalizedMessage) || state.modify_field;
+            if (missing.length > 0 || Object.keys(changes).length === 0) {
+                const field = missing[0] || requestedField;
                 state = {
                     ...state,
                     modify_mode: 'modify_booking',
-                    modify_step: 'awaiting_value',
-                    modify_field: requestedField,
+                    modify_step: field ? 'awaiting_value' : 'choose_field',
+                    modify_field: field,
+                    modify_updates: changes,
                 };
                 sessionState.set(session_id, state);
-
-                const msg = buildModifyPrompt(requestedField);
+                const msg = field ? buildModifyPrompt(field)
+                    : 'What would you like to change? You can say date, time, guests, phone number, notes, or name.';
                 await saveConversation(session_id, message, msg);
                 return res.json({
-                    intent: 'modify_booking',
-                    message: msg,
-                    speak: msg,
-                    data: state,
-                    missing_fields: [],
-                    confidence: 1,
-                    session_token: sessionToken,
+                    intent: 'modify_booking', message: msg, speak: msg, data: state,
+                    missing_fields: [], confidence: 1, session_token: sessionToken,
                 });
             }
 
-            if (state.modify_step === 'awaiting_value' && state.modify_field) {
-                const alternateField = detectModifyField(normalizedMessage);
-                if (alternateField && alternateField !== state.modify_field) {
-                    state = {
-                        ...state,
-                        modify_mode: 'modify_booking',
-                        modify_step: 'awaiting_value',
-                        modify_field: alternateField,
-                    };
-                    sessionState.set(session_id, state);
+            const editBookingId = state.edit_booking_id || state.id;
+            if (!editBookingId) {
+                const msg = "I couldn't keep track of the booking we were editing. Please start the change again.";
+                state = { ...state, modify_mode: null, modify_step: null, modify_field: null, edit_booking_id: null, modify_updates: null };
+                sessionState.set(session_id, state);
+                await saveConversation(session_id, message, msg);
+                return res.json({
+                    intent: 'modify_booking', message: msg, speak: msg, data: state,
+                    missing_fields: [], confidence: 0.4, session_token: sessionToken,
+                });
+            }
 
-                    const msg = buildModifyPrompt(alternateField);
-                    await saveConversation(session_id, message, msg);
-                    return res.json({
-                        intent: 'modify_booking',
-                        message: msg,
-                        speak: msg,
-                        data: state,
-                        missing_fields: [],
-                        confidence: 1,
-                        session_token: sessionToken,
-                    });
-                }
+            // Moving hotel arrival dates keeps the existing number of nights unless
+            // the guest also supplies a new checkout date.
+            if (state.service_type === 'hotel' && changes.date && !changes.end_date) {
+                const stayDays = bookingStayDays(state.date, state.end_date);
+                if (stayDays) changes.end_date = addBookingDays(changes.date, stayDays);
+            }
+            if (state.service_type === 'hotel' && (changes.date || changes.end_date)
+                && !bookingStayDays(changes.date || state.date, changes.end_date || state.end_date)) {
+                state = { ...state, modify_step: 'awaiting_value', modify_field: 'end_date', modify_updates: changes };
+                sessionState.set(session_id, state);
+                const msg = 'The check-out date must be after the check-in date. What check-out date would you like?';
+                await saveConversation(session_id, message, msg);
+                return res.json({
+                    intent: 'modify_booking', message: msg, speak: msg, data: state,
+                    missing_fields: [], confidence: 1, session_token: sessionToken,
+                });
+            }
 
-                const updateValue = extractModifyValue(state.modify_field, normalizedMessage);
-                if (updateValue === null || updateValue === undefined || updateValue === '') {
-                    const msg = buildModifyPrompt(state.modify_field);
-                    await saveConversation(session_id, message, msg);
-                    return res.json({
-                        intent: 'modify_booking',
-                        message: msg,
-                        speak: msg,
-                        data: state,
-                        missing_fields: [],
-                        confidence: 1,
-                        session_token: sessionToken,
-                    });
-                }
+            const columns = Object.keys(changes);
+            const values = columns.map((column) => column === 'date' || column === 'end_date'
+                ? parseDate(changes[column]) : changes[column]);
+            const assignments = columns.map((column, index) => `${column} = $${index + 1}`).join(', ');
+            const updated = await query(
+                `UPDATE bookings SET ${assignments}, status = CASE WHEN status = 'confirmed' THEN 'modified' ELSE status END, updated_at = NOW()
+                 WHERE id = $${values.length + 1} RETURNING *`,
+                [...values, editBookingId]
+            );
+            if (updated.rows.length === 0) {
+                const msg = "I couldn't update that booking just now. Please try again.";
+                await saveConversation(session_id, message, msg);
+                return res.json({
+                    intent: 'modify_booking', message: msg, speak: msg, data: state,
+                    missing_fields: [], confidence: 0.4, session_token: sessionToken,
+                });
+            }
 
-                const editBookingId = state.edit_booking_id || state.id;
-                if (!editBookingId) {
-                    const msg = "I couldn't keep track of the booking we were editing. Please start the change again.";
-                    state = { ...state, modify_mode: null, modify_step: null, modify_field: null, edit_booking_id: null };
-                    sessionState.set(session_id, state);
-                    await saveConversation(session_id, message, msg);
-                    return res.json({
-                        intent: 'modify_booking',
-                        message: msg,
-                        speak: msg,
-                        data: state,
-                        missing_fields: [],
-                        confidence: 0.4,
-                        session_token: sessionToken,
-                    });
-                }
-
-                const updateColumn = state.modify_field;
-                const dbValue = updateColumn === 'date'
-                    ? (parseDate(updateValue) || updateValue)
-                    : updateColumn === 'people'
-                        ? Number(updateValue)
-                        : updateValue;
-                const updated = await query(
-                    `UPDATE bookings SET ${updateColumn} = $1, status = CASE WHEN status = 'confirmed' THEN 'modified' ELSE status END, updated_at = NOW()
-                     WHERE id = $2 RETURNING *`,
-                    [dbValue, editBookingId]
-                );
-
-                if (updated.rows.length === 0) {
-                    const msg = "I couldn't update that booking just now. Please try again.";
-                    await saveConversation(session_id, message, msg);
-                    return res.json({
-                        intent: 'modify_booking',
-                        message: msg,
-                        speak: msg,
-                        data: state,
-                        missing_fields: [],
-                        confidence: 0.4,
-                        session_token: sessionToken,
-                    });
-                }
-
-                const booking = normalizeBooking(updated.rows[0]);
+            const rawBooking = updated.rows[0];
+            let calendarSync = { status: isCalendarSyncEnabled() ? 'failed' : 'disabled' };
+            if (calendarSync.status !== 'disabled') {
                 try {
-                    const eventId = await upsertEvent(booking);
-                    if (eventId && eventId !== booking.google_event_id) {
-                        await query('UPDATE bookings SET google_event_id = $1 WHERE id = $2', [eventId, booking.id]);
-                        booking.google_event_id = eventId;
+                    const eventId = await upsertEvent(rawBooking);
+                    if (eventId) {
+                        if (eventId !== rawBooking.google_event_id) {
+                            await query('UPDATE bookings SET google_event_id = $1 WHERE id = $2', [eventId, rawBooking.id]);
+                            rawBooking.google_event_id = eventId;
+                        }
+                        calendarSync = { status: 'synced' };
                     }
                 } catch (calendarErr) {
-                    console.error('[chat booking sync]', calendarErr);
+                    console.error('[chat booking sync]', calendarErr.message);
                 }
-                state = {
-                    ...state,
-                    ...booking,
-                    modify_mode: null,
-                    modify_step: null,
-                    modify_field: null,
-                    edit_booking_id: null,
-                };
-                sessionState.set(session_id, state);
-
-                const msg = `Perfect, I've updated your ${booking.service_type} reservation.`;
-                await saveConversation(session_id, message, msg);
-
-                return res.json({
-                    intent: 'modify_booking',
-                    message: msg,
-                    speak: msg,
-                    data: state,
-                    missing_fields: [],
-                    confidence: 1,
-                    session_token: sessionToken,
-                });
             }
+            const booking = normalizeBooking(rawBooking);
+            state = {
+                ...state, ...booking, calendar_sync: calendarSync,
+                modify_mode: 'modify_booking', modify_step: 'choose_field',
+                modify_field: null, modify_updates: null, edit_booking_id: booking.id,
+            };
+            sessionState.set(session_id, state);
+            const changedDetails = [];
+            if (changes.date) changedDetails.push(`date ${booking.date}`);
+            if (changes.end_date) changedDetails.push(`check-out ${booking.end_date}`);
+            if (changes.people) changedDetails.push(`${booking.people} guests`);
+            if (changes.contact_phone) changedDetails.push(`phone ${booking.phone_number}`);
+            if (changes.start_time) changedDetails.push(`time ${booking.start_time}`);
+            if (changes.reservation_name) changedDetails.push(`name ${booking.reservation_name}`);
+            if (changes.notes) changedDetails.push('notes saved');
+            const syncMessage = calendarSync.status === 'synced' ? ' Google Calendar has been updated.'
+                : calendarSync.status === 'disabled' ? ' Google Calendar sync is disabled; your booking changes are saved.'
+                    : ' Your booking changes are saved, but Google Calendar could not be updated.';
+            const msg = `I've updated your ${booking.service_type} reservation: ${changedDetails.join(', ')}.${syncMessage}`;
+            await saveConversation(session_id, message, msg);
+            return res.json({
+                intent: 'modify_booking', message: msg, speak: msg, data: state,
+                missing_fields: [], confidence: 1, session_token: sessionToken,
+            });
         }
 
         const llmResponse = await chat(history, normalizedMessage, today, state, memoryContext);
@@ -1359,7 +1231,7 @@ router.post('/', async (req, res) => {
                 };
                 sessionState.set(session_id, state);
 
-                const msg = `I've found your ${booking.service_type} reservation for ${data.date} under the name "${booking.reservation_name}". What would you like to change? You can say date, time, guests, notes, or name.`;
+                const msg = `I've found your ${booking.service_type} reservation for ${data.date} under the name "${booking.reservation_name}". What would you like to change? You can say date, time, guests, phone number, notes, or name.`;
                 return res.json({
                     ...parsed,
                     message: msg,
@@ -1539,11 +1411,16 @@ router.post('/confirm', requireSessionToken, async (req, res) => {
         sessionState.set(session_id, state);
 
         // Final Sync with Google Calendar on explicit confirmation
+        let calendarSync = { status: isCalendarSyncEnabled() ? 'failed' : 'disabled' };
         try {
             if (confirmedBooking.status === 'confirmed') {
-                const eventId = await upsertEvent(confirmedBooking);
-                if (eventId) {
-                    await query('UPDATE bookings SET google_event_id = $1 WHERE id = $2', [eventId, confirmedBooking.id]);
+                if (calendarSync.status !== 'disabled') {
+                    const eventId = await upsertEvent(confirmedBooking);
+                    if (eventId) {
+                        await query('UPDATE bookings SET google_event_id = $1 WHERE id = $2', [eventId, confirmedBooking.id]);
+                        confirmedBooking.google_event_id = eventId;
+                        calendarSync = { status: 'synced' };
+                    }
                 }
                 // Notify customer
                 await notifyBooking({
@@ -1554,10 +1431,15 @@ router.post('/confirm', requireSessionToken, async (req, res) => {
                     isVip: false,
                 });
             } else if (confirmedBooking.status === 'cancelled') {
-                if (confirmedBooking.google_event_id) {
+                if (confirmedBooking.google_event_id && calendarSync.status !== 'disabled') {
                     const { cancelEvent } = await import('../services/googleCalendar.js');
-                    await cancelEvent(confirmedBooking.google_event_id);
-                    await query('UPDATE bookings SET google_event_id = NULL WHERE id = $1', [confirmedBooking.id]);
+                    if (await cancelEvent(confirmedBooking.google_event_id)) {
+                        await query('UPDATE bookings SET google_event_id = NULL WHERE id = $1', [confirmedBooking.id]);
+                        confirmedBooking.google_event_id = null;
+                        calendarSync = { status: 'synced' };
+                    }
+                } else if (!confirmedBooking.google_event_id && calendarSync.status !== 'disabled') {
+                    calendarSync = { status: 'synced' };
                 }
                 await notifyBooking({
                     type: 'cancel',
@@ -1579,9 +1461,16 @@ router.post('/confirm', requireSessionToken, async (req, res) => {
             // We still consider the booking confirmed in our DB even if calendar fails
         }
 
+        state = { ...state, ...normalizeBooking(confirmedBooking), calendar_sync: calendarSync };
+        sessionState.set(session_id, state);
+
         return res.json({
             success: true,
             booking_id: confirmedBooking.id,
+            calendar_sync: calendarSync,
+            message: calendarSync.status === 'synced' ? 'Booking saved and Google Calendar updated.'
+                : calendarSync.status === 'disabled' ? 'Booking saved. Google Calendar sync is disabled.'
+                    : 'Booking saved, but Google Calendar could not be updated.',
             session_token: sessionToken,
         });
     } catch (err) {

@@ -1,229 +1,104 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef } from 'react';
 import { useAudioProcessor } from '../lib/useAudioProcessor';
 
 interface ThinkingOrbProps {
     isThinking: boolean;
     isListening?: boolean;
-    trigger?: 'voice' | 'text';
 }
 
-const VOICE_TASKS = [
-    'transcribing speech..',
-    'parsing intent..',
-    'searching archives..',
-    'analyzing context..',
-    'optimizing response..',
-    'refining tone..',
-    'synthesizing output..',
-];
-
-const TEXT_TASKS = [
-    'analyzing context..',
-    'searching archives..',
-    'optimizing response..',
-    'running semantic match..',
-    'fetching memory..',
-    'synthesizing output..',
-];
-
-export default function ThinkingOrb({ isThinking, isListening = false, trigger = 'text' }: ThinkingOrbProps) {
+/** Inline voice feedback keeps the conversation and composer accessible. */
+export default function ThinkingOrb({ isThinking, isListening = false }: ThinkingOrbProps) {
     const { volume, frequency } = useAudioProcessor(isListening);
     const volumeRef = useRef(0);
-    const lerpedVolRef = useRef(0);
-    const freqRef = useRef<number[]>([]);
+    const frequencyRef = useRef<number[]>([]);
+    const canvasRef = useRef<HTMLCanvasElement>(null);
 
     useEffect(() => {
         volumeRef.current = volume;
-        freqRef.current = frequency;
+        frequencyRef.current = frequency;
     }, [volume, frequency]);
 
-    const canvasRef = useRef<HTMLCanvasElement>(null);
-    const rafRef = useRef<number | null>(null);
-    const taskIdxRef = useRef(0);
-    const taskIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-    const [currentTask, setCurrentTask] = useState("");
-    const [taskOpacity, setTaskOpacity] = useState(0);
-
     useEffect(() => {
+        if (!isThinking) return;
         const canvas = canvasRef.current;
-        if (!canvas) return;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) return;
+        const context = canvas?.getContext('2d');
+        if (!canvas || !context) return;
 
-        let W = canvas.width;
-        let H = canvas.height;
-        let CX = W / 2;
-        let CY = H / 2;
-        const baseR = Math.min(W, H) * 0.25;
-
-        let t = 0;
-
+        let frame = 0;
+        let phase = 0;
+        let smoothedVolume = 0;
+        const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
         const resize = () => {
-            W = canvas.width = canvas.offsetWidth * window.devicePixelRatio;
-            H = canvas.height = canvas.offsetHeight * window.devicePixelRatio;
-            CX = W / 2;
-            CY = H / 2;
-            ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
-            // Adjusted coordinates for scaled context
-            CX /= window.devicePixelRatio;
-            CY /= window.devicePixelRatio;
+            const ratio = window.devicePixelRatio || 1;
+            canvas.width = canvas.offsetWidth * ratio;
+            canvas.height = canvas.offsetHeight * ratio;
+            context.setTransform(ratio, 0, 0, ratio, 0, 0);
         };
         resize();
-        const ro = new ResizeObserver(resize);
-        ro.observe(canvas);
+        const observer = new ResizeObserver(resize);
+        observer.observe(canvas);
 
         const draw = () => {
-            const currentW = canvas.width / window.devicePixelRatio;
-            const currentH = canvas.height / window.devicePixelRatio;
-            ctx.clearRect(0, 0, currentW, currentH);
+            const width = canvas.offsetWidth;
+            const height = canvas.offsetHeight;
+            const centerX = width / 2;
+            const centerY = height / 2;
+            const radius = Math.min(width, height) * 0.25;
+            context.clearRect(0, 0, width, height);
+            smoothedVolume += (volumeRef.current - smoothedVolume) * 0.2;
+            const level = Math.min(smoothedVolume * 2, 1);
 
-            lerpedVolRef.current += (volumeRef.current - lerpedVolRef.current) * 0.15;
-            const v = lerpedVolRef.current;
-            const freqs = freqRef.current;
+            const glow = context.createRadialGradient(centerX, centerY, 0, centerX, centerY, radius * 1.6);
+            glow.addColorStop(0, `rgba(201, 169, 110, ${0.15 + level * 0.25})`);
+            glow.addColorStop(1, 'rgba(201, 169, 110, 0)');
+            context.fillStyle = glow;
+            context.fillRect(0, 0, width, height);
 
-            // 1. Central Glow Circle
-            const coreSize = baseR * (0.9 + v * 0.3);
-            const coreGradient = ctx.createRadialGradient(CX, CY, 0, CX, CY, coreSize);
-            coreGradient.addColorStop(0, `rgba(201, 169, 110, ${0.15 + v * 0.25})`);
-            coreGradient.addColorStop(0.6, `rgba(201, 169, 110, ${0.05 + v * 0.1})`);
-            coreGradient.addColorStop(1, 'rgba(0,0,0,0)');
-            
-            ctx.beginPath();
-            ctx.arc(CX, CY, coreSize, 0, Math.PI * 2);
-            ctx.fillStyle = coreGradient;
-            ctx.fill();
-
-            // 2. Vibrating Strings (Sine Waves)
-            const numStrings = 6;
-            for (let i = 0; i < numStrings; i++) {
-                ctx.beginPath();
-                const alpha = (0.4 - i * 0.05 + v * 0.5);
-                ctx.strokeStyle = `rgba(201, 169, 110, ${Math.max(0.1, alpha).toFixed(2)})`;
-                ctx.lineWidth = 1.2 + v * 3;
-                
-                const stringR = baseR * (0.95 + i * 0.08);
-                const segments = 150;
-                
-                for (let s = 0; s <= segments; s++) {
-                    const angle = (s / segments) * Math.PI * 2;
-                    
-                    // Wave modulation based on time, string index, and audio
-                    const freqIdx = Math.floor((s / segments) * 16) % 32;
-                    const fVal = (freqs[freqIdx] || 0) / 255;
-                    
-                    const baseNoise = Math.sin(angle * (3 + i % 2) + t * (1.5 + i * 0.5));
-                    const jitter = Math.cos(angle * 8 - t * 4) * 0.5;
-                    const audioBoost = isListening ? fVal * 45 * (v + 0.2) : v * 15;
-                    
-                    const dist = stringR + (baseNoise + jitter) * (4 + v * 20) + audioBoost;
-                    const x = CX + Math.cos(angle) * dist;
-                    const y = CY + Math.sin(angle) * dist;
-                    
-                    if (s === 0) ctx.moveTo(x, y);
-                    else ctx.lineTo(x, y);
+            for (let ring = 0; ring < 6; ring++) {
+                context.beginPath();
+                context.strokeStyle = `rgba(201, 169, 110, ${0.6 - ring * 0.06 + level * 0.2})`;
+                context.lineWidth = 0.8 + level * 1.5;
+                for (let point = 0; point <= 100; point++) {
+                    const angle = point / 100 * Math.PI * 2;
+                    const spectrum = (frequencyRef.current[point % 32] || 0) / 255;
+                    const wave = Math.sin(angle * (3 + ring % 2) + phase * (1 + ring * 0.2));
+                    const movement = reduceMotion ? 0 : wave * (1.5 + level * 4);
+                    const sound = isListening ? spectrum * radius * 0.2 * level : 0;
+                    const distance = radius * (0.85 + ring * 0.08) + movement + sound;
+                    const x = centerX + Math.cos(angle) * distance;
+                    const y = centerY + Math.sin(angle) * distance;
+                    if (point === 0) context.moveTo(x, y);
+                    else context.lineTo(x, y);
                 }
-                ctx.closePath();
-                ctx.stroke();
+                context.closePath();
+                context.stroke();
             }
-
-            // 3. Inner stable ring
-            ctx.beginPath();
-            ctx.arc(CX, CY, baseR * 0.9, 0, Math.PI * 2);
-            ctx.strokeStyle = `rgba(201, 169, 110, ${0.1 + v * 0.2})`;
-            ctx.lineWidth = 0.5;
-            ctx.stroke();
-
-            t += 0.015 + v * 0.04;
-            rafRef.current = requestAnimationFrame(draw);
+            phase += 0.02 + level * 0.04;
+            frame = requestAnimationFrame(draw);
         };
-
-        rafRef.current = requestAnimationFrame(draw);
+        frame = requestAnimationFrame(draw);
         return () => {
-            if (rafRef.current) cancelAnimationFrame(rafRef.current);
-            ro.disconnect();
+            cancelAnimationFrame(frame);
+            observer.disconnect();
         };
-    }, [isListening]);
+    }, [isThinking, isListening]);
 
-    useEffect(() => {
-        if (isListening || !isThinking) {
-            setTaskOpacity(0);
-            return;
-        }
-        
-        const tasks = trigger === 'voice' ? VOICE_TASKS : TEXT_TASKS;
-        taskIdxRef.current = 0;
-        setCurrentTask(tasks[0]);
-        setTaskOpacity(1);
-
-        taskIntervalRef.current = setInterval(() => {
-            setTaskOpacity(0);
-            setTimeout(() => {
-                taskIdxRef.current = (taskIdxRef.current + 1) % tasks.length;
-                setCurrentTask(tasks[taskIdxRef.current]);
-                setTaskOpacity(1);
-            }, 400);
-        }, 2200);
-
-        return () => {
-            if (taskIntervalRef.current) clearInterval(taskIntervalRef.current);
-        };
-    }, [trigger, isThinking, isListening]);
+    if (!isThinking) return null;
 
     return (
-        <div
-            aria-hidden={!isThinking}
-            style={{
-                position: 'fixed',
-                inset: 0,
-                zIndex: 150,
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                justifyContent: 'center',
-                pointerEvents: 'none',
-                opacity: isThinking ? 1 : 0,
-                transition: 'opacity 0.6s ease, transform 0.6s cubic-bezier(0.16, 1, 0.3, 1)',
-                transform: isThinking ? 'scale(1)' : 'scale(0.95)',
-                background: isThinking ? 'rgba(249, 247, 242, 0.4)' : 'transparent',
-                backdropFilter: isThinking ? 'blur(8px)' : 'none',
-            }}
-        >
-            <canvas ref={canvasRef} style={{ width: '100%', maxWidth: '480px', aspectRatio: '1/1' }} />
-            <div
-                style={{
-                    marginTop: '-64px',
-                    color: '#c9a96e',
-                    fontFamily: "'Instrument Serif', serif",
-                    fontSize: '24px',
-                    transition: 'opacity 0.4s ease',
-                    opacity: isThinking || isListening ? 1 : 0,
-                    userSelect: 'none',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    alignItems: 'center',
-                    gap: '8px',
-                }}
-            >
-                {isListening ? (
-                    <div className="flex flex-col items-center">
-                        <div className="flex space-x-1 mb-2">
-                             {[0, 1, 2].map(i => (
-                                <span key={i} className="h-1 w-1 rounded-full bg-gold animate-bounce" style={{ animationDelay: `${i * 0.15}s` }} />
-                             ))}
-                        </div>
-                        <span className="tracking-tight lowercase text-ink/40 font-bold text-xs uppercase tracking-widest not-italic">Listening...</span>
-                    </div>
-                ) : (
-                    <span 
-                        className="lowercase first-letter:uppercase"
-                        style={{ opacity: taskOpacity, transition: 'opacity 0.4s ease' }}
-                    >
-                        {trigger === 'voice' ? 'Transcribing...' : (currentTask || 'Thinking...')}
-                    </span>
-                )}
+        <div className="mb-3 flex items-center gap-3 rounded-2xl border border-gold/20 bg-white/70 px-3 py-1 shadow-sm sm:gap-4" data-testid="speech-feedback">
+            <canvas ref={canvasRef} className="h-20 w-20 shrink-0 sm:h-24 sm:w-24" aria-hidden="true" />
+            <div className="min-w-0 py-3">
+                <p className="text-sm font-semibold text-ink" role="status" aria-live="polite">
+                    {isListening ? 'Listening…' : 'Preparing your reply…'}
+                </p>
+                <p className="mt-1 text-xs leading-relaxed text-ink/60">
+                    {isListening
+                        ? 'Speak naturally. Review your words below, then send.'
+                        : 'Your concierge will respond shortly.'}
+                </p>
             </div>
         </div>
     );

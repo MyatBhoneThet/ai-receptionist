@@ -41,6 +41,14 @@ export interface ChatResponse {
     show_reservation_slip?: boolean;
 }
 
+export interface ConfirmBookingResponse {
+    success: boolean;
+    message: string;
+    booking_id?: number;
+    session_token?: string;
+    calendar_sync?: { status: 'synced' | 'failed' | 'disabled' };
+}
+
 export interface InventoryOption {
     id: number;
     category: string;
@@ -137,8 +145,8 @@ export async function sendMessage(session_id: string, message: string): Promise<
 /**
  * Confirm the pending booking for a session
  */
-export async function confirmBooking(session_id: string, session_token: string, action?: 'confirm' | 'cancel'): Promise<any> {
-    const { data } = await api.post('/api/chat/confirm', { session_id, session_token, action }, {
+export async function confirmBooking(session_id: string, session_token: string, action?: 'confirm' | 'cancel'): Promise<ConfirmBookingResponse> {
+    const { data } = await api.post<ConfirmBookingResponse>('/api/chat/confirm', { session_id, session_token, action }, {
         headers: {
             'X-Session-Id': session_id,
             'X-Session-Token': session_token,

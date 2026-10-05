@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import ChatWindow from '../components/ChatWindow';
 import VoiceInput from '../components/VoiceInput';
@@ -8,7 +8,7 @@ import TextInput from '../components/TextInput';
 import BookingSummary from '../components/BookingSummary';
 import ConfirmModal from '../components/ConfirmModal';
 import ThinkingOrb from '../components/ThinkingOrb';
-import { sendMessage, ChatResponse, BookingData } from '../lib/api';
+import { sendMessage, ChatResponse, BookingData, ConfirmBookingResponse } from '../lib/api';
 
 /**
  * Speak a string using Web Speech Synthesis
@@ -68,8 +68,7 @@ export default function Page() {
     const [showConfirm, setShowConfirm] = useState<boolean>(false);
     const [interimTranscript, setInterimTranscript] = useState<string>('');
     const [isListening, setIsListening] = useState<boolean>(false);
-    const isSpeakingRef = useRef<boolean>(false);
-    const lastInputWasVoiceRef = useRef<boolean>(false);
+    const [speechError, setSpeechError] = useState<string>('');
     const [inputValue, setInputValue] = useState<string>('');
     const [speechLang, setSpeechLang] = useState<string>('en-US');
 
@@ -95,7 +94,6 @@ export default function Page() {
             setConfidence(response.confidence);
 
             if (response.speak) {
-                isSpeakingRef.current = true;
                 speakText(response.speak);
             }
 
@@ -120,21 +118,23 @@ export default function Page() {
 
     const handleVoiceTranscript = useCallback((text: string) => {
         setInterimTranscript('');
-        lastInputWasVoiceRef.current = true;
         setInputValue(text);
     }, []);
 
     const handleTextSend = useCallback((text: string) => {
-        lastInputWasVoiceRef.current = false;
         handleSend(text);
     }, [handleSend]);
 
-    const handleConfirmed = () => {
+    const handleConfirmed = (response: ConfirmBookingResponse) => {
         const isCancel = currentIntent === 'cancel_booking' || currentIntent === 'cancel';
         setShowConfirm(false);
-        const confirmMsg = isCancel 
+        const confirmMsg = response.message || (isCancel
             ? '🗑️ Your booking has been cancelled. Is there anything else I can help with?'
-            : 'Your booking is confirmed! Have a nice day!';
+            : 'Your booking is confirmed! Have a nice day!');
+        if (response.session_token) {
+            setSessionToken(response.session_token);
+            localStorage.setItem('ai_receptionist_session_token', response.session_token);
+        }
         setMessages((prev) => [...prev, { role: 'assistant', content: confirmMsg }]);
         speakText(confirmMsg);
         setCurrentData(null);
@@ -151,11 +151,6 @@ export default function Page() {
 
     return (
         <>
-            <ThinkingOrb
-                isThinking={loading || isListening}
-                isListening={isListening}
-                trigger={lastInputWasVoiceRef.current ? 'voice' : 'text'}
-            />
             <main className="flex h-screen w-full overflow-hidden bg-parchment">
                 {/* 1. Left Sidebar — Brand & Identity */}
                 <aside className="hidden w-72 flex-col border-r border-parchment material-parchment p-8 lg:flex">
@@ -232,8 +227,9 @@ export default function Page() {
                         <ChatWindow messages={messages} />
                     </div>
 
-                    <footer className="p-8 bg-gradient-to-t from-white/80 to-transparent">
+                    <footer className="shrink-0 p-4 sm:p-6 lg:p-8 bg-gradient-to-t from-white/80 to-transparent">
                         <div className="mx-auto max-w-3xl">
+                            <ThinkingOrb isThinking={loading || isListening} isListening={isListening} />
                             {interimTranscript && (
                                 <div className="flex items-center space-x-3 px-4 py-2 mb-4 rounded-full bg-white/60 border border-parchment animate-fade-in shadow-sm">
                                     <span className="h-1.5 w-1.5 rounded-full bg-gold animate-pulse" />
@@ -246,14 +242,19 @@ export default function Page() {
                                 <VoiceInput
                                     onTranscript={handleVoiceTranscript}
                                     onInterimTranscript={setInterimTranscript}
-                                    onListeningChange={setIsListening}
+                                    onListeningChange={(next) => {
+                                        setIsListening(next);
+                                        if (next) setSpeechError('');
+                                    }}
+                                    onError={setSpeechError}
                                     disabled={loading}
                                     lang={speechLang}
                                 />
-                                <div className="flex-1 space-y-3">
+                                <div className="min-w-0 flex-1 space-y-3">
                                     <div className="flex items-center gap-2">
-                                        <label className="text-[10px] font-bold uppercase tracking-widest text-ink/50">Voice lang</label>
+                                        <label htmlFor="speech-language" className="text-[10px] font-bold uppercase tracking-widest text-ink/50">Voice lang</label>
                                         <select
+                                            id="speech-language"
                                             className="rounded-full border border-parchment bg-white px-3 py-1 text-xs text-ink/70"
                                             value={speechLang}
                                             onChange={(e) => setSpeechLang(e.target.value)}
@@ -267,17 +268,7 @@ export default function Page() {
                                     <TextInput onSend={handleTextSend} disabled={loading} value={inputValue} onChangeValue={setInputValue} />
                                 </div>
                             </div>
-                            {interimTranscript && (
-                                <div className="mt-3 flex items-center space-x-3 text-xs text-ink/60">
-                                    <button
-                                        className="px-3 py-1 rounded-full bg-ink text-white text-[11px] font-bold uppercase tracking-widest"
-                                        onClick={() => setInputValue(interimTranscript.trim())}
-                                    >
-                                        Edit transcript
-                                    </button>
-                                    <span className="truncate">"{interimTranscript}..."</span>
-                                </div>
-                            )}
+                            {speechError && <p className="mt-3 text-xs text-ink/70" role="alert">{speechError}</p>}
                         </div>
                     </footer>
                 </section>

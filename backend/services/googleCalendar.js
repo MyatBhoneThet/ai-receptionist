@@ -1,5 +1,6 @@
 import { google } from 'googleapis';
 import 'dotenv/config';
+import { formatDateKey } from './dateOnly.js';
 
 const SCOPES = ['https://www.googleapis.com/auth/calendar'];
 const calendarId = process.env.GOOGLE_CALENDAR_ID;
@@ -7,11 +8,15 @@ const CALENDAR_TIMEZONE = process.env.CALENDAR_TIMEZONE || 'Asia/Bangkok';
 
 // Fix private key formatting safely
 const processedKey = process.env.GOOGLE_PRIVATE_KEY
-    ? process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n')
+    ? process.env.GOOGLE_PRIVATE_KEY.replace(/\\+n/g, '\n')
     : null;
 
+export function isCalendarSyncEnabled() {
+    return Boolean(calendarId && process.env.GOOGLE_CLIENT_EMAIL && processedKey);
+}
+
 // Validate env early
-if (!calendarId || !process.env.GOOGLE_CLIENT_EMAIL || !processedKey) {
+if (!isCalendarSyncEnabled()) {
     console.warn('[Google Calendar] Missing credentials. Calendar sync disabled.');
 }
 
@@ -28,51 +33,44 @@ function formatDateLocal(date) {
     if (!date) return null;
 
     if (typeof date === 'string') {
-        if (/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-            return date;
-        }
-
-        const parsed = new Date(date);
-        if (!Number.isNaN(parsed.getTime())) {
-            return new Intl.DateTimeFormat('en-CA', {
-                timeZone: CALENDAR_TIMEZONE,
-                year: 'numeric',
-                month: '2-digit',
-                day: '2-digit',
-            }).format(parsed);
-        }
-
+        // Parse date-only strings explicitly; JS Date treats ambiguous
+        // DD-MM-YYYY values as US month-first dates.
         const dmY = date.match(/^(\d{2})-(\d{2})-(\d{4})$/);
-        if (dmY) {
-            const [, dd, mm, yyyy] = dmY;
-            return `${yyyy}-${mm}-${dd}`;
+        const dateKey = dmY ? `${dmY[3]}-${dmY[2]}-${dmY[1]}` : date;
+        if (/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) {
+            const parsed = new Date(`${dateKey}T00:00:00Z`);
+            return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === dateKey
+                ? dateKey
+                : null;
         }
-
-        return null;
+        // Only offset-bearing timestamps have an unambiguous instant to convert.
+        if (!/^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:\d{2})$/.test(date)) return null;
+        const parsed = new Date(date);
+        if (Number.isNaN(parsed.getTime())) return null;
+        const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
+            timeZone: CALENDAR_TIMEZONE,
+            year: 'numeric', month: '2-digit', day: '2-digit',
+        }).formatToParts(parsed).map(({ type, value }) => [type, value]));
+        return `${parts.year}-${parts.month}-${parts.day}`;
     }
 
-    const d = new Date(date);
-    if (Number.isNaN(d.getTime())) return null;
-
-    return new Intl.DateTimeFormat('en-CA', {
-        timeZone: CALENDAR_TIMEZONE,
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-    }).format(d);
+    // pg represents SQL DATE values as local-midnight Date objects.
+    // Preserve that calendar day instead of shifting it to another zone.
+    if (!(date instanceof Date) || Number.isNaN(date.getTime())) return null;
+    return formatDateKey(date);
 }
 
 // Build ISO datetime safely WITHOUT shifting timezone incorrectly
 function buildDateTime(dateStr, timeStr) {
-    let time = timeStr || '12:00:00';
-    // Ensure HH:MM:SS format
-    if (time.length === 5) time += ':00';
+    const match = String(timeStr || '12:00:00').match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+    if (!match || Number(match[1]) > 23 || Number(match[2]) > 59 || Number(match[3] || 0) > 59) return null;
+    const time = `${match[1].padStart(2, '0')}:${match[2]}:${match[3] || '00'}`;
     return `${dateStr}T${time}`;
 }
 
 // Create or update event
 export async function upsertEvent(booking) {
-    if (!calendarId || !processedKey) return null;
+    if (!isCalendarSyncEnabled()) return null;
 
     try {
         const {
@@ -88,10 +86,15 @@ export async function upsertEvent(booking) {
         } = booking;
 
         const startDateStr = formatDateLocal(date);
-        const endDateStr = formatDateLocal(end_date) || startDateStr;
+        const parsedEndDate = formatDateLocal(end_date);
+        const endDateStr = parsedEndDate || startDateStr;
 
         if (!startDateStr) {
             console.error('[Google Calendar] Invalid start date');
+            return null;
+        }
+        if (end_date && !parsedEndDate) {
+            console.error('[Google Calendar] Invalid end date');
             return null;
         }
 
@@ -108,20 +111,18 @@ export async function upsertEvent(booking) {
         let finalStartTime = buildDateTime(startDateStr, start_time);
         let finalEndTime = buildDateTime(endDateStr, end_time || start_time);
 
-        // Simple check: if end <= start on the same day OR if start > end across days
-        if (new Date(finalEndTime) <= new Date(finalStartTime)) {
-            console.log('[Google Calendar] Adjusting invalid time range...');
-            const startDT = new Date(finalStartTime);
-            const adjustedEndDT = new Date(startDT.getTime() + 60 * 60 * 1000); // Default to +1 hour
+        if (!finalStartTime || !finalEndTime) {
+            console.error('[Google Calendar] Invalid booking time');
+            return null;
+        }
 
-            // Format back to YYYY-MM-DDTHH:MM (local-ish, since we don't shift TZ here)
-            const year = adjustedEndDT.getFullYear();
-            const month = String(adjustedEndDT.getMonth() + 1).padStart(2, '0');
-            const day = String(adjustedEndDT.getDate()).padStart(2, '0');
-            const hours = String(adjustedEndDT.getHours()).padStart(2, '0');
-            const minutes = String(adjustedEndDT.getMinutes()).padStart(2, '0');
-            const seconds = String(adjustedEndDT.getSeconds()).padStart(2, '0');
-            finalEndTime = `${year}-${month}-${day}T${hours}:${minutes}:${seconds}`;
+        // Simple check: if end <= start on the same day OR if start > end across days
+        if (finalEndTime <= finalStartTime) {
+            console.log('[Google Calendar] Adjusting invalid time range...');
+            // Advance wall-clock fields independently of the host timezone.
+            const startDT = new Date(`${finalStartTime}Z`);
+            const adjustedEndDT = new Date(startDT.getTime() + 60 * 60 * 1000); // Default to +1 hour
+            finalEndTime = adjustedEndDT.toISOString().slice(0, 19);
         }
 
         const event = {
@@ -160,7 +161,7 @@ export async function upsertEvent(booking) {
         console.error('[Google Calendar] Sync error:', error.message);
 
         // Recover if event was deleted manually
-        if (error.code === 404 && booking.google_event_id) {
+        if ([404, 410].includes(Number(error.code || error.response?.status)) && booking.google_event_id) {
             console.log('[Google Calendar] Recreating deleted event...');
             return upsertEvent({ ...booking, google_event_id: null });
         }

@@ -1,19 +1,20 @@
 'use client';
 
 import React from 'react';
-import { confirmBooking } from '../lib/api';
+import { confirmBooking, ConfirmBookingResponse } from '../lib/api';
 
 interface ConfirmModalProps {
     sessionId: string;
     sessionToken: string;
     summary: any;
     intent: string;
-    onConfirm: () => void;
+    onConfirm: (response: ConfirmBookingResponse) => void;
     onCancel: () => void;
 }
 
 export default function ConfirmModal({ sessionId, sessionToken, summary, intent, onConfirm, onCancel }: ConfirmModalProps) {
     const [loading, setLoading] = React.useState(false);
+    const [error, setError] = React.useState('');
     if (!summary) return null;
 
     const isCancellation = intent === 'cancel_booking' || intent === 'cancel';
@@ -40,12 +41,17 @@ export default function ConfirmModal({ sessionId, sessionToken, summary, intent,
     const handleConfirm = async () => {
         if (loading || !sessionToken) return;
         setLoading(true);
+        setError('');
         try {
-            await confirmBooking(sessionId, sessionToken, isCancellation ? 'cancel' : 'confirm');
-            onConfirm();
+            const response = await confirmBooking(sessionId, sessionToken, isCancellation ? 'cancel' : 'confirm');
+            if (!response.success) {
+                setError(response.message || 'The booking could not be saved. Please try again.');
+                return;
+            }
+            onConfirm(response);
         } catch (err) {
             console.error('[ConfirmModal] Confirm error:', err);
-            onConfirm();
+            setError('The booking could not be saved. Please try again.');
         } finally {
             setLoading(false);
         }
@@ -83,6 +89,7 @@ export default function ConfirmModal({ sessionId, sessionToken, summary, intent,
                         ))}
                     </div>
 
+                    {error && <p className="mt-6 text-sm text-red-700" role="alert">{error}</p>}
                     <div className="mt-10 flex gap-4">
                         <button
                             className="flex-1 rounded-full border border-ink/10 py-5 text-[11px] font-bold uppercase tracking-widest text-ink/40 transition-all hover:bg-parchment hover:text-ink disabled:opacity-50"

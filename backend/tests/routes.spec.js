@@ -623,6 +623,9 @@ const query = jest.fn(async (sql, params = []) => {
     const row = state.bookings.find((item) => String(item.id) === String(params[params.length - 1]));
     if (!row) return makeRows([]);
     applyAssignments(row, normalized, params);
+    if (normalized.includes("status = case when status = 'confirmed'") && row.status === 'confirmed') {
+      row.status = 'modified';
+    }
     row.updated_at = new Date();
     return makeRows([row]);
   }
@@ -703,16 +706,25 @@ await jest.unstable_mockModule('../services/llm.js', () => ({
     confidence: 1,
   })),
 }));
+const upsertCalendarEvent = jest.fn(async () => null);
+const calendarEnabled = jest.fn(() => true);
 await jest.unstable_mockModule('../services/googleCalendar.js', () => ({
-  upsertEvent: jest.fn(async () => null),
+  upsertEvent: upsertCalendarEvent,
   cancelEvent: jest.fn(async () => undefined),
   getEventStatus: jest.fn(async () => ({ available: true, reason: 'found' })),
+  isCalendarSyncEnabled: calendarEnabled,
+}));
+await jest.unstable_mockModule('../middleware/rateLimiter.js', () => ({
+  globalLimiter: (_req, _res, next) => next(),
+  chatLimiter: (_req, _res, next) => next(),
+  bookingsLimiter: (_req, _res, next) => next(),
+  authLimiter: (_req, _res, next) => next(),
 }));
 
 const { default: app } = await import('../index.js');
 const { createSessionToken } = await import('../middleware/auth.js');
 const { chat: mockChat } = await import('../services/llm.js');
-const { upsertEvent: mockUpsertEvent } = await import('../services/googleCalendar.js');
+const { upsertEvent: mockUpsertEvent, isCalendarSyncEnabled: mockCalendarEnabled } = await import('../services/googleCalendar.js');
 
 const runRoutes = process.env.NO_LISTEN !== 'true';
 
@@ -720,7 +732,8 @@ const runRoutes = process.env.NO_LISTEN !== 'true';
   beforeEach(() => {
     resetState();
     mockChat.mockClear();
-    mockUpsertEvent.mockClear();
+    mockUpsertEvent.mockReset().mockResolvedValue(null);
+    mockCalendarEnabled.mockReset().mockReturnValue(true);
     process.env.STAFF_WEBHOOK_URL = '';
     process.env.STAFF_ALERT_EMAIL = '';
     process.env.STAFF_WEBHOOK_PROVIDER = 'slack';
@@ -1166,6 +1179,175 @@ const runRoutes = process.env.NO_LISTEN !== 'true';
     expect(slipRes.body.show_reservation_slip).toBe(true);
     expect(slipRes.body.data.people).toBe(6);
     expect(slipRes.body.message).toContain('You booked 6 guests');
+  });
+
+  describe('plain-English booking changes', () => {
+    let fixtureNumber = 0;
+    let sessionId;
+    const originalTimezone = process.env.CALENDAR_TIMEZONE;
+
+    beforeEach(() => {
+      process.env.CALENDAR_TIMEZONE = 'Asia/Bangkok';
+      jest.useFakeTimers({
+        now: new Date('2026-10-04T18:30:00Z'),
+        doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'hrtime', 'performance', 'queueMicrotask'],
+      });
+      sessionId = `sess-natural-modify-${++fixtureNumber}`;
+      state.bookings.push({
+        id: 50,
+        session_id: sessionId,
+        service_type: 'hotel',
+        date: '2026-10-05',
+        end_date: '2026-10-08',
+        start_time: '14:00:00',
+        end_time: '11:00:00',
+        reservation_name: 'Brett',
+        people: 4,
+        notes: '',
+        status: 'confirmed',
+        waitlisted: false,
+        contact_phone: '0801111111',
+        google_event_id: 'existing-calendar-event',
+        created_at: new Date(),
+        updated_at: new Date(),
+      });
+      mockUpsertEvent.mockResolvedValue('existing-calendar-event');
+    });
+
+    afterEach(() => {
+      jest.useRealTimers();
+      if (originalTimezone === undefined) delete process.env.CALENDAR_TIMEZONE;
+      else process.env.CALENDAR_TIMEZONE = originalTimezone;
+    });
+
+    async function openReservationSlip() {
+      const response = await request(app).post('/api/chat').send({
+        session_id: sessionId, message: 'show me the reservation slip',
+      });
+      expect(response.status).toBe(200);
+      expect(response.body.show_reservation_slip).toBe(true);
+      expect(response.body.data.phone_number).toBe('0801111111');
+    }
+
+    async function change(message) {
+      return request(app).post('/api/chat').send({ session_id: sessionId, message });
+    }
+
+    it('applies date, spoken guest count and phone from one choose-field message', async () => {
+      await openReservationSlip();
+      const response = await change('Change my booking to day after tomorrow, not tomorrow, for five guests, phone number is 0807777777');
+
+      expect(response.status).toBe(200);
+      expect(response.body.data).toEqual(expect.objectContaining({
+        date: '07-10-2026', end_date: '10-10-2026', people: 5,
+        contact_phone: '0807777777', phone_number: '0807777777', status: 'modified',
+        calendar_sync: { status: 'synced' },
+      }));
+      expect(response.body.message).toContain('5 guests');
+      expect(response.body.message).toContain('Google Calendar has been updated');
+      expect(mockChat).not.toHaveBeenCalled();
+      expect(mockUpsertEvent).toHaveBeenCalledWith(expect.objectContaining({
+        date: '2026-10-07', end_date: '2026-10-10', people: 5, contact_phone: '0807777777',
+      }));
+      expect(state.bookings.find((item) => item.id === 50).date).toBe('2026-10-07');
+    });
+
+    it('accepts a written ordinal date after the ordinary date prompt', async () => {
+      await openReservationSlip();
+      expect((await change('date')).body.message).toContain('What date would you like instead?');
+      const response = await change('seventh October this year');
+      expect(response.body.data.date).toBe('07-10-2026');
+      expect(response.body.data.end_date).toBe('10-10-2026');
+    });
+
+    it('applies the screenshot-shaped restaurant change without asking for values again', async () => {
+      Object.assign(state.bookings.find((item) => item.id === 50), {
+        service_type: 'restaurant', end_date: null, start_time: '18:00:00', end_time: '19:00:00',
+      });
+      await openReservationSlip();
+      const response = await change("we'll come the day after tomorrow and. the guest is five change the phone number into 0807777777");
+      expect(response.body.data).toEqual(expect.objectContaining({
+        date: '07-10-2026', people: 5, contact_phone: '0807777777', phone_number: '0807777777',
+      }));
+      expect(response.body.message).toContain('updated your restaurant reservation');
+      expect(mockUpsertEvent).toHaveBeenCalledWith(expect.objectContaining({
+        date: '2026-10-07', people: 5, contact_phone: '0807777777',
+      }));
+    });
+
+    it('retains supplied guest and phone changes while an invalid date is corrected', async () => {
+      await openReservationSlip();
+      const invalid = await change('Change the date to 31-02-2026 for five guests, phone number 0807777777');
+      expect(invalid.body.message).toContain('What date would you like instead?');
+      expect(state.bookings.find((item) => item.id === 50).people).toBe(4);
+      expect(mockUpsertEvent).not.toHaveBeenCalled();
+
+      const response = await change('tomorrow');
+      expect(response.body.data).toEqual(expect.objectContaining({
+        date: '06-10-2026', end_date: '09-10-2026', people: 5, phone_number: '0807777777',
+      }));
+    });
+
+    it('honors an explicit new hotel checkout instead of preserving the old duration', async () => {
+      await openReservationSlip();
+      const response = await change('Change check-in to seventh October this year and check-out to twelfth October this year');
+      expect(response.body.data.date).toBe('07-10-2026');
+      expect(response.body.data.end_date).toBe('12-10-2026');
+    });
+
+    it('keeps the chosen arrival while correcting an invalid checkout', async () => {
+      await openReservationSlip();
+      const invalid = await change('Change check-in to seventh October this year and check-out to sixth October this year');
+      expect(invalid.body.message).toContain('check-out date must be after');
+      const response = await change('twelfth October this year');
+      expect(response.body.data.date).toBe('07-10-2026');
+      expect(response.body.data.end_date).toBe('12-10-2026');
+    });
+
+    it('keeps numeric date/time edits working and accepts a bare phone after its prompt', async () => {
+      await openReservationSlip();
+      const dated = await change('Change date to 09-10-2026 and time to 09:30');
+      expect(dated.body.data.date).toBe('09-10-2026');
+      expect(dated.body.data.start_time).toBe('09:30:00');
+      expect((await change('phone number')).body.message).toContain('What phone number');
+      const response = await change('0808888888');
+      expect(response.body.data.phone_number).toBe('0808888888');
+    });
+
+    it('reports saved booking changes when Calendar returns no event', async () => {
+      await openReservationSlip();
+      mockUpsertEvent.mockResolvedValue(null);
+      const response = await change('Move the date to tomorrow');
+      expect(response.body.data.date).toBe('06-10-2026');
+      expect(response.body.data.calendar_sync).toEqual({ status: 'failed' });
+      expect(response.body.message).toContain('Google Calendar could not be updated');
+      expect(response.body.message).not.toContain('Google Calendar has been updated');
+    });
+
+    it('reports disabled Calendar sync without attempting an API call', async () => {
+      await openReservationSlip();
+      mockCalendarEnabled.mockReturnValue(false);
+      const response = await change('five guests');
+      expect(response.body.data.people).toBe(5);
+      expect(response.body.data.calendar_sync).toEqual({ status: 'disabled' });
+      expect(response.body.message).toContain('sync is disabled');
+      expect(mockUpsertEvent).not.toHaveBeenCalled();
+    });
+
+    it('keeps the booking edit saved if the Calendar operation throws', async () => {
+      await openReservationSlip();
+      mockUpsertEvent.mockRejectedValue(new Error('Calendar unavailable'));
+      const errorLog = jest.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const response = await change('Move the date to tomorrow');
+        expect(response.status).toBe(200);
+        expect(response.body.data.date).toBe('06-10-2026');
+        expect(response.body.data.calendar_sync).toEqual({ status: 'failed' });
+        expect(response.body.message).toContain('Google Calendar could not be updated');
+      } finally {
+        errorLog.mockRestore();
+      }
+    });
   });
 
   it('treats a fresh dinner request as a new booking instead of reusing old modify state', async () => {

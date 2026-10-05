@@ -17,8 +17,9 @@ An intelligent Hotel & Restaurant Receptionist powered by AI, designed to handle
   - 🍽️ **Restaurant**: Book tables with guest counts and specific times.
   - 🏨 **Hotel**: Manage check-ins, check-outs, and room reservations.
   - 🤝 **Meetings**: Schedule meeting rooms and locations.
-- **Google Calendar Sync**: Automatic synchronization of bookings with Google Calendar via Service Account integration.
-- **Speech Capabilities**: Integrated speech-to-text recognition for a voice-first experience.
+- **Booking Changes**: Accepts dates such as “day after tomorrow” or “seventh October this year”, including guest and phone changes in the same message.
+- **Google Calendar Sync**: Updates the existing Calendar event when a booking changes and reports whether synchronization succeeded.
+- **Speech Capabilities**: Stops listening after an utterance and places the transcript in the editable input. The responsive speech sphere stays above the input while listening.
 - **Database Persistence**: Reliable storage of conversations and bookings using PostgreSQL (Neon DB).
 - **Security Hardened**: 
   - Multi-tier rate limiting (Global, Chat, and Bookings).
@@ -72,6 +73,7 @@ TRUST_PROXY=false
 GOOGLE_CALENDAR_ID=email
 GOOGLE_CLIENT_EMAIL=service_account_email
 GOOGLE_PRIVATE_KEY="private_key"
+CALENDAR_TIMEZONE=Asia/Bangkok
 NEXT_PUBLIC_API_URL=http://localhost:4000
 NEXT_PUBLIC_ENABLE_LOCALSTORAGE_AUTH_FALLBACK=true
 SMTP_HOST=

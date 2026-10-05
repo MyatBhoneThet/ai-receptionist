@@ -1,7 +1,7 @@
 "use client";
 
 import { motion, AnimatePresence } from "framer-motion";
-import { useEffect, useState, useMemo } from "react";
+import { useState, useMemo } from "react";
 import { Mic, MicOff } from "lucide-react";
 import { useAudioProcessor } from "../lib/useAudioProcessor";
 import { useSpeechRecognition } from "../lib/useSpeechRecognition";
@@ -9,7 +9,7 @@ import { useSpeechRecognition } from "../lib/useSpeechRecognition";
 export const SpeechOrb = () => {
     const [isActive, setIsActive] = useState(false);
     const { volume, frequency, isSpeaking } = useAudioProcessor(isActive);
-    const transcript = useSpeechRecognition(isActive);
+    const transcript = useSpeechRecognition(isActive, () => setIsActive(false));
 
     const borderRadius = useMemo(() => {
         if (!isSpeaking) return "50% 50% 50% 50%";
