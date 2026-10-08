@@ -3,7 +3,7 @@ import 'dotenv/config';
 import { formatDateKey } from './dateOnly.js';
 
 const SCOPES = ['https://www.googleapis.com/auth/calendar'];
-const calendarId = process.env.GOOGLE_CALENDAR_ID;
+const defaultCalendarId = process.env.GOOGLE_CALENDAR_ID;
 const CALENDAR_TIMEZONE = process.env.CALENDAR_TIMEZONE || 'Asia/Bangkok';
 
 // Fix private key formatting safely
@@ -11,7 +11,7 @@ const processedKey = process.env.GOOGLE_PRIVATE_KEY
     ? process.env.GOOGLE_PRIVATE_KEY.replace(/\\+n/g, '\n')
     : null;
 
-export function isCalendarSyncEnabled() {
+export function isCalendarSyncEnabled(calendarId = defaultCalendarId) {
     return Boolean(calendarId && process.env.GOOGLE_CLIENT_EMAIL && processedKey);
 }
 
@@ -69,8 +69,11 @@ function buildDateTime(dateStr, timeStr) {
 }
 
 // Create or update event
-export async function upsertEvent(booking) {
-    if (!isCalendarSyncEnabled()) return null;
+export async function upsertEvent(booking, target = {}) {
+    // `target.calendarId` selects a business's own calendar; the default is the
+    // deployment-wide calendar from the environment.
+    const calendarId = target.calendarId || defaultCalendarId;
+    if (!isCalendarSyncEnabled(calendarId)) return null;
 
     try {
         const {
@@ -163,7 +166,7 @@ export async function upsertEvent(booking) {
         // Recover if event was deleted manually
         if ([404, 410].includes(Number(error.code || error.response?.status)) && booking.google_event_id) {
             console.log('[Google Calendar] Recreating deleted event...');
-            return upsertEvent({ ...booking, google_event_id: null });
+            return upsertEvent({ ...booking, google_event_id: null }, target);
         }
 
         return null;
@@ -171,7 +174,8 @@ export async function upsertEvent(booking) {
 }
 
 // Delete event
-export async function cancelEvent(googleEventId) {
+export async function cancelEvent(googleEventId, target = {}) {
+    const calendarId = target.calendarId || defaultCalendarId;
     if (!calendarId || !googleEventId) return false;
 
     try {
@@ -192,7 +196,8 @@ export async function cancelEvent(googleEventId) {
     }
 }
 
-export async function getEventStatus(googleEventId) {
+export async function getEventStatus(googleEventId, target = {}) {
+    const calendarId = target.calendarId || defaultCalendarId;
     if (!calendarId || !googleEventId) return { available: false, reason: 'disabled' };
 
     try {

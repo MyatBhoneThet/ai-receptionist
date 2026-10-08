@@ -99,8 +99,10 @@ export async function notifyBooking({
   toPhone,
   booking,
   isVip,
+  businessId,
+  allowEnvFallback = !businessId,
 }) {
-  const notificationSettings = await getNotificationSettings();
+  const notificationSettings = await getNotificationSettings(businessId, { allowEnvFallback });
   const subjectMap = {
     confirm: 'Your booking is confirmed',
     remind: 'Upcoming booking reminder',
@@ -116,21 +118,21 @@ export async function notifyBooking({
   const results = {};
   if (toEmail) results.email = await sendEmail(toEmail, subject, text, html);
   if (toPhone) results.sms = await sendSms(toPhone, text);
-  if (isVip && (notificationSettings.alert_email || process.env.STAFF_ALERT_EMAIL)) {
+  if (isVip && (notificationSettings.alert_email)) {
     results.staff = await sendEmail(
-      notificationSettings.alert_email || process.env.STAFF_ALERT_EMAIL,
+      notificationSettings.alert_email,
       'VIP booking alert',
       text,
       html
     );
   }
-  if (notificationSettings.webhook_url || process.env.STAFF_WEBHOOK_URL) {
-    const webhookUrl = notificationSettings.webhook_url || process.env.STAFF_WEBHOOK_URL;
+  if (notificationSettings.webhook_url) {
+    const webhookUrl = notificationSettings.webhook_url;
     const webhookPayload = formatWebhookPayload({
       type,
       booking,
       isVip,
-      provider: notificationSettings.provider || process.env.STAFF_WEBHOOK_PROVIDER || 'slack',
+      provider: notificationSettings.provider || 'slack',
     });
     results.staff_webhook = await sendStaffWebhook(webhookPayload, webhookUrl);
   }

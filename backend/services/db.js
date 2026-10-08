@@ -40,3 +40,19 @@ export async function query(text, params) {
 }
 
 export default pool;
+
+/** Run `fn` inside one transaction on one connection. Rolls back on any error. */
+export async function withTransaction(fn) {
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        const result = await fn(client);
+        await client.query('COMMIT');
+        return result;
+    } catch (err) {
+        try { await client.query('ROLLBACK'); } catch { /* connection already broken */ }
+        throw err;
+    } finally {
+        client.release();
+    }
+}

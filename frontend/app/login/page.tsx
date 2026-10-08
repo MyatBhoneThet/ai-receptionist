@@ -21,11 +21,13 @@ export default function LoginPage() {
         const res = await login({ email, password });
         // Token also set as httpOnly cookie; storing is optional for client-only calls.
         localStorage.setItem('ai_receptionist_auth_token', res.token);
-        setMessage('Logged in! Cookie set; you can now open the admin dashboard.');
+        setMessage('Signed in. Opening your dashboard…');
+        window.location.href = '/dashboard';
       } else {
         const res = await register({ email, password, name, phone_number: phone });
         localStorage.setItem('ai_receptionist_auth_token', res.token);
-        setMessage('Account created. Cookie set; you can now open the admin dashboard.');
+        setMessage('Account created. Opening setup…');
+        window.location.href = '/setup';
       }
     } catch (err: any) {
       setMessage(err?.response?.data?.error || 'Authentication failed');

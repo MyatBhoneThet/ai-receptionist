@@ -72,7 +72,9 @@ const REQUIRED_FIELDS: Record<string, SummaryField[]> = {
 
 const SLIP_FIELDS: SummaryField[] = [
     { key: 'id', label: 'Slip ID', placeholder: 'Not recorded' },
-    { key: 'status', label: 'Status', placeholder: 'Not recorded' },
+    { key: 'display_status', label: 'Status', placeholder: 'Not recorded' },
+    { key: 'resource_type_name', label: 'Type', placeholder: 'Not recorded' },
+    { key: 'resource_code', label: 'Room / table', placeholder: 'Assigned later' },
     { key: 'service_type', label: 'Service', placeholder: 'Not recorded' },
     { key: 'date', label: 'Date', placeholder: 'Not recorded' },
     { key: 'end_date', label: 'Check-Out', placeholder: 'Not recorded' },
@@ -92,8 +94,17 @@ const SEARCH_FIELDS: SummaryField[] = [
     { key: 'reservation_name', label: 'Reservation Name', placeholder: 'Whose reservation?' },
 ];
 
+const STATUS_TEXT: Record<string, string> = {
+    pending: 'Held — not yet confirmed', confirmed: 'Confirmed', modified: 'Confirmed (changed)', cancelled: 'Cancelled',
+    checked_in: 'In progress', completed: 'Completed', no_show: 'No-show',
+    waitlisted: 'On the waitlist — not a confirmed booking',
+    awaiting_confirmation: 'Awaiting confirmation — not yet confirmed',
+    needs_attention: 'Being checked by our team',
+};
+
 function formatSummaryValue(key: string, value: unknown) {
     if (value === null || value === undefined || value === '') return '';
+    if (key === 'display_status') return STATUS_TEXT[String(value)] || String(value);
     if (key === 'service_type') return SERVICE_LABELS[String(value)] || String(value);
     if (key === 'date' || key === 'end_date') {
         if (typeof value === 'string') {
@@ -132,7 +143,8 @@ export default function BookingSummary({ data, missing_fields = [], intent, conf
     React.useEffect(() => {
         let mounted = true;
         async function fetchAvailability() {
-            if (searchMode || !data?.service_type || !data?.date) {
+            // A saved reservation shows its own status; only a draft needs a live check.
+            if (searchMode || slipMode || !data?.service_type || !data?.date) {
                 setAvailability(null);
                 return;
             }
@@ -149,7 +161,6 @@ export default function BookingSummary({ data, missing_fields = [], intent, conf
                     end_time: data.end_time,
                     people: data.people,
                     preferred_inventory: data.preferred_inventory,
-                    exclude_booking_id: data.id,
                     session_id: sessionId,
                     session_token: sessionToken,
                 });
@@ -160,12 +171,15 @@ export default function BookingSummary({ data, missing_fields = [], intent, conf
         }
         fetchAvailability();
         return () => { mounted = false; };
-    }, [data?.service_type, data?.date, data?.end_date, data?.start_time, data?.end_time, data?.people, data?.id, data?.preferred_inventory, searchMode, sessionId, sessionToken, availabilityProp]);
+    }, [data?.service_type, data?.date, data?.end_date, data?.start_time, data?.end_time, data?.people, data?.id, data?.preferred_inventory, searchMode, slipMode, sessionId, sessionToken, availabilityProp]);
 
     const bookable = ['book_restaurant', 'book_hotel', 'book_meeting'];
     if (!data || !intent || (!bookable.includes(intent) && !reservationIntent)) return null;
 
-    const requiredFields = searchMode ? SEARCH_FIELDS : slipMode ? SLIP_FIELDS : (REQUIRED_FIELDS[intent] || []);
+    // A check-out date only exists for hotel stays; an unassigned room/table is not "missing".
+    const slipFields = SLIP_FIELDS.filter((field) => (field.key !== 'end_date' || data.service_type === 'hotel')
+        && (!['resource_code', 'resource_type_name'].includes(field.key) || data[field.key]));
+    const requiredFields = searchMode ? SEARCH_FIELDS : slipMode ? slipFields : (REQUIRED_FIELDS[intent] || []);
     const icon = ICONS[data.service_type as string] || '📋';
     const pct = Math.round((confidence || 0) * 100);
 
@@ -260,7 +274,18 @@ export default function BookingSummary({ data, missing_fields = [], intent, conf
                     </div>
                 )}
 
-                {!searchMode && availability && (
+                {!searchMode && data.quote && (Number(data.quote.total) > 0 || Number(data.quote.minimum_spend) > 0 || data.quote.deposit?.required) && (
+                    <div className="mt-3 rounded-xl border border-parchment p-4 bg-parchment/40">
+                        <p className="text-[9px] font-bold uppercase tracking-widest text-ink/40 mb-2">Price and terms</p>
+                        <ul className="space-y-1 text-xs text-ink/80">
+                            {Number(data.quote.total) > 0 && <li><span className="font-semibold">Total:</span> {data.quote.total} {data.quote.currency}</li>}
+                            {Number(data.quote.minimum_spend) > 0 && <li><span className="font-semibold">Minimum spend:</span> {data.quote.minimum_spend} {data.quote.currency}</li>}
+                            {data.quote.deposit?.required && <li><span className="font-semibold">Deposit:</span> {data.quote.deposit.amount} {data.quote.currency} — arranged by staff, nothing is charged online</li>}
+                        </ul>
+                    </div>
+                )}
+
+                {!searchMode && !slipMode && availability && (
                     <div className="mt-3 rounded-xl border border-ink/10 p-4 bg-white flex items-center justify-between">
                         <div>
                             <p className="text-[9px] uppercase tracking-widest text-ink/40 font-bold">Availability</p>
@@ -274,14 +299,14 @@ export default function BookingSummary({ data, missing_fields = [], intent, conf
                             )}
                         </div>
                         {availability.waitlist ? (
-                            <span className="px-3 py-1 rounded-full bg-rose-50 text-rose-600 text-[11px] font-bold uppercase tracking-widest">Waitlist</span>
+                            <span className="px-3 py-1 rounded-full bg-rose-50 text-rose-600 text-[11px] font-bold uppercase tracking-widest">{availability.waitlist_possible === false ? 'Unavailable' : 'Full'}</span>
                         ) : (
                             <span className="px-3 py-1 rounded-full bg-emerald-50 text-emerald-700 text-[11px] font-bold uppercase tracking-widest">Open</span>
                         )}
                     </div>
                 )}
 
-                {!searchMode && availability?.waitlist && availability?.alternative && (() => {
+                {!searchMode && !slipMode && availability?.waitlist && availability?.alternative && (() => {
                     const alternative = availability.alternative;
                     return (
                     <div className="mt-2 rounded-xl border border-amber-100 bg-amber-50 p-3 space-y-2">
@@ -322,7 +347,7 @@ export default function BookingSummary({ data, missing_fields = [], intent, conf
                     <div className="flex flex-col">
                         <span className="text-[9px] font-bold text-white/40 uppercase tracking-widest leading-none mb-1">Status</span>
                         <span className="text-[11px] font-bold text-white uppercase tracking-tighter">
-                            {searchMode ? 'No reservation selected' : slipMode ? 'Reservation Slip' : 'Drafting Request'}
+                            {searchMode ? 'No reservation selected' : slipMode ? (STATUS_TEXT[String(data.display_status)] || 'Reservation Slip') : 'Draft — nothing is held yet'}
                         </span>
                     </div>
                     <div className="h-2 w-2 rounded-full bg-gold animate-pulse shadow-[0_0_8px_rgba(201,169,110,0.5)]" />

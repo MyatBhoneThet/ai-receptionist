@@ -9,16 +9,21 @@ interface ConfirmModalProps {
     summary: any;
     intent: string;
     onConfirm: (response: ConfirmBookingResponse) => void;
+    /** Nothing was booked; the reason goes back into the conversation. */
+    onFailed?: (response: ConfirmBookingResponse) => void;
     onCancel: () => void;
 }
 
-export default function ConfirmModal({ sessionId, sessionToken, summary, intent, onConfirm, onCancel }: ConfirmModalProps) {
+export default function ConfirmModal({ sessionId, sessionToken, summary, intent, onConfirm, onFailed, onCancel }: ConfirmModalProps) {
     const [loading, setLoading] = React.useState(false);
     const [error, setError] = React.useState('');
     if (!summary) return null;
 
     const isCancellation = intent === 'cancel_booking' || intent === 'cancel';
-    const isWaitlist = summary.waitlisted;
+    const isWaitlist = Boolean(summary.draft?.waitlist ?? summary.waitlisted);
+    const quote = isCancellation ? null : summary.quote;
+    const money = (amount: string) => `${amount} ${quote?.currency || ''}`.trim();
+    const typeName = summary.inventory_option?.name || summary.resource_type_name;
     const formatDate = (value: unknown) => {
         if (!value) return '';
         if (typeof value === 'string') {
@@ -45,6 +50,9 @@ export default function ConfirmModal({ sessionId, sessionToken, summary, intent,
         try {
             const response = await confirmBooking(sessionId, sessionToken, isCancellation ? 'cancel' : 'confirm', summary.edit_booking_id || summary.id);
             if (!response.success) {
+                // Unavailable, changed terms, or the reservation system is down:
+                // explain it in the chat rather than leaving a stuck dialog.
+                if (onFailed && response.message) { onFailed(response); return; }
                 setError(response.message || 'The booking could not be saved. Please try again.');
                 return;
             }
@@ -69,7 +77,7 @@ export default function ConfirmModal({ sessionId, sessionToken, summary, intent,
                         {isCancellation ? 'revisiting your plans?' : isWaitlist ? 'join the waitlist' : 'confirm your selection'}
                     </h2>
                     <p className="mt-2 text-[10px] font-bold uppercase tracking-[0.2em] text-gold relative z-10">
-                        {isCancellation ? 'Once cancelled, the reservation is released' : isWaitlist ? 'We will notify you if a spot opens' : 'Please review your concierge summary'}
+                        {isCancellation ? 'Once cancelled, the reservation is released' : isWaitlist ? 'A waitlist place is not a confirmed booking' : 'Availability is checked again when you confirm'}
                     </p>
                 </div>
 
@@ -81,6 +89,10 @@ export default function ConfirmModal({ sessionId, sessionToken, summary, intent,
                             { label: 'Time', value: summary.start_time ? `${summary.start_time}${summary.end_time ? ` – ${summary.end_time}` : ''}` : null },
                             { label: 'Guests', value: summary.people },
                             { label: 'Name', value: summary.reservation_name },
+                            { label: 'Type', value: isCancellation || isWaitlist ? null : typeName },
+                            { label: 'Total', value: quote && Number(quote.total) > 0 ? money(quote.total) : null },
+                            { label: 'Minimum spend', value: quote && Number(quote.minimum_spend) > 0 ? money(quote.minimum_spend) : null },
+                            { label: 'Deposit (arranged by staff)', value: quote?.deposit?.required ? money(quote.deposit.amount) : null },
                         ].map((item) => item.value && (
                             <div key={item.label} className="flex justify-between items-baseline border-b border-ink/5 pb-2 last:border-0 last:pb-0">
                                 <span className="text-[10px] font-bold uppercase tracking-widest text-ink/30 serif">{item.label}</span>

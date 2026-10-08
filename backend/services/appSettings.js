@@ -30,42 +30,43 @@ function buildChangeSummary(beforeState = {}, afterState = {}) {
   return changes;
 }
 
-export async function getNotificationSettings() {
-  if (process.env.NODE_ENV === 'test' && process.env.USE_APP_SETTINGS_QUERY_IN_TEST !== 'true') {
-    return {
-      provider: process.env.STAFF_WEBHOOK_PROVIDER || 'slack',
-      webhook_url: process.env.STAFF_WEBHOOK_URL || '',
-      alert_email: process.env.STAFF_ALERT_EMAIL || '',
-    };
-  }
+const envNotificationSettings = () => ({
+  provider: process.env.STAFF_WEBHOOK_PROVIDER || 'slack',
+  webhook_url: process.env.STAFF_WEBHOOK_URL || '',
+  alert_email: process.env.STAFF_ALERT_EMAIL || '',
+});
+const emptyNotificationSettings = () => ({ provider: 'slack', webhook_url: '', alert_email: '' });
 
+/**
+ * Notification settings for one business. Environment-variable defaults apply
+ * only to the pre-platform (legacy) business, so one business's alerts can
+ * never be delivered to another's webhook.
+ */
+export async function getNotificationSettings(businessId, { allowEnvFallback = false } = {}) {
+  if (!businessId) return envNotificationSettings();
+  if (process.env.NODE_ENV === 'test' && process.env.USE_APP_SETTINGS_QUERY_IN_TEST !== 'true') {
+    return allowEnvFallback ? envNotificationSettings() : emptyNotificationSettings();
+  }
+  const fallback = allowEnvFallback ? envNotificationSettings() : emptyNotificationSettings();
   try {
     const result = await query(
-      `SELECT key, value FROM app_settings WHERE key = ANY($1::text[])`,
-      [NOTIFICATION_KEYS]
+      `SELECT key, value FROM app_settings WHERE business_id = $2 AND key = ANY($1::text[])`,
+      [NOTIFICATION_KEYS, businessId]
     );
-
     const rows = Object.fromEntries(result.rows.map((row) => [row.key, row]));
-
     return {
-      provider: unwrapJsonValue(rows.notification_provider, process.env.STAFF_WEBHOOK_PROVIDER || 'slack'),
-      webhook_url: unwrapJsonValue(rows.staff_webhook_url, process.env.STAFF_WEBHOOK_URL || ''),
-      alert_email: unwrapJsonValue(rows.staff_alert_email, process.env.STAFF_ALERT_EMAIL || ''),
+      provider: unwrapJsonValue(rows.notification_provider, fallback.provider),
+      webhook_url: unwrapJsonValue(rows.staff_webhook_url, fallback.webhook_url),
+      alert_email: unwrapJsonValue(rows.staff_alert_email, fallback.alert_email),
     };
   } catch (err) {
-    if (process.env.NODE_ENV !== 'test') {
-      console.error('[getNotificationSettings] Falling back to env defaults:', err.message);
-    }
-    return {
-      provider: process.env.STAFF_WEBHOOK_PROVIDER || 'slack',
-      webhook_url: process.env.STAFF_WEBHOOK_URL || '',
-      alert_email: process.env.STAFF_ALERT_EMAIL || '',
-    };
+    console.error('[getNotificationSettings] Falling back to defaults:', err.message);
+    return fallback;
   }
 }
 
-export async function upsertNotificationSettings({ provider, webhook_url, alert_email }, actorEmail = 'admin') {
-  const previous = await getNotificationSettings();
+export async function upsertNotificationSettings(businessId, { provider, webhook_url, alert_email }, actor = {}) {
+  const previous = await getNotificationSettings(businessId);
   const entries = [
     ['notification_provider', provider],
     ['staff_webhook_url', webhook_url],
@@ -74,66 +75,33 @@ export async function upsertNotificationSettings({ provider, webhook_url, alert_
 
   for (const [key, value] of entries) {
     await query(
-      `INSERT INTO app_settings (key, value)
-       VALUES ($1, $2::jsonb)
-       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
-      [key, JSON.stringify({ value })]
+      `INSERT INTO app_settings (business_id, key, value)
+       VALUES ($1, $2, $3::jsonb)
+       ON CONFLICT (business_id, key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+      [businessId, key, JSON.stringify({ value })]
     );
   }
 
   await query(
-    `INSERT INTO audit_logs (actor_email, action, entity, before_state, after_state)
-     VALUES ($1, $2, $3, $4::jsonb, $5::jsonb)`,
-    [
-      actorEmail,
-      'update',
-      'notification_settings',
-      JSON.stringify(previous),
-      JSON.stringify({ provider, webhook_url, alert_email }),
-    ]
+    `INSERT INTO audit_logs (business_id, actor_email, actor_user_id, action, entity, before_state, after_state)
+     VALUES ($1, $2, $3, 'update', 'notification_settings', $4::jsonb, $5::jsonb)`,
+    [businessId, actor.email || 'system', actor.userId || null, JSON.stringify(previous),
+      JSON.stringify({ provider, webhook_url, alert_email })]
   );
 
-  return getNotificationSettings();
+  return getNotificationSettings(businessId);
 }
 
-export async function listRecentAuditLogs(limit = 20, entity = '') {
-  const values = [Math.min(Number(limit) || 20, 100)];
-  const where = entity ? 'WHERE entity = $2' : '';
-  if (entity) values.push(entity);
+export async function getBusinessSetting(businessId, key) {
+  const result = await query('SELECT value FROM app_settings WHERE business_id = $1 AND key = $2', [businessId, key]);
+  return result.rows[0] ? unwrapJsonValue(result.rows[0], '') : '';
+}
 
-  const result = await query(
-    `SELECT id, actor_email, action, entity, before_state, after_state, created_at
-     FROM audit_logs
-     ${where}
-     ORDER BY created_at DESC
-     LIMIT $1`,
-    values
-  );
-
-  return result.rows.map((row) => ({
-    ...row,
-    change_summary: buildChangeSummary(row.before_state, row.after_state),
-  }));
+export async function setBusinessSetting(businessId, key, value) {
+  await query(
+    `INSERT INTO app_settings (business_id, key, value) VALUES ($1, $2, $3::jsonb)
+     ON CONFLICT (business_id, key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+    [businessId, key, JSON.stringify({ value })]);
 }
 
 export { buildChangeSummary };
-
-export async function recordAuditLog({
-  actorEmail = 'admin',
-  action,
-  entity,
-  beforeState = {},
-  afterState = {},
-}) {
-  await query(
-    `INSERT INTO audit_logs (actor_email, action, entity, before_state, after_state)
-     VALUES ($1, $2, $3, $4::jsonb, $5::jsonb)`,
-    [
-      actorEmail,
-      action,
-      entity,
-      JSON.stringify(beforeState),
-      JSON.stringify(afterState),
-    ]
-  );
-}

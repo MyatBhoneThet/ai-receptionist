@@ -1,31 +1,84 @@
 import express from 'express';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { v4 as uuidv4 } from 'uuid';
 import { chat } from '../services/llm.js';
 import { validateBookingResponse } from '../validation/bookingSchema.js';
 import { query } from '../services/db.js';
-import { upsertEvent, isCalendarSyncEnabled } from '../services/googleCalendar.js';
 import { chatLimiter } from '../middleware/rateLimiter.js';
-import { createSessionToken, requireSessionToken } from '../middleware/auth.js';
-import { notifyBooking } from '../services/notifications.js';
+import { createSessionToken, requireSessionToken, resolveGuestBusiness } from '../middleware/auth.js';
 import { findUserByEmail, verifyAccessToken } from '../services/auth.js';
-import { checkAvailability, findAlternativeAvailability, findDuplicateBooking } from '../services/availability.js';
 import { formatDisplayDateValue } from '../services/dateOnly.js';
 import { resolveBookingService, hasBookingServiceExpression } from '../services/bookingService.js';
-import { validateBookingAlteration } from '../services/bookingAlteration.js';
+import { normalizeBookingAlteration } from '../services/bookingAlteration.js';
 import {
     calendarToday, bookingDateKey, addBookingDays,
     bookingStayDays, extractNaturalBookingDate, hasBookingDateExpression,
 } from '../services/bookingDates.js';
+import { BookingError } from '../platform/errors.js';
+import { bookableServices } from '../platform/businesses.js';
+import * as booking from '../booking/service.js';
+import { describeQuote } from '../booking/engine.js';
+import { RESERVATION_SELECT, shapeReservation } from '../booking/reservations.js';
+import { syncCalendar } from '../booking/downstream.js';
+import { optionSummary, toLegacyAlternative, toLegacyAvailability } from '../booking/legacyShape.js';
 
 const router = express.Router();
 
 // Apply chat-specific rate limit (20 req / 1 min per IP)
 router.use(chatLimiter);
 
-// simple in-memory session state
-const sessionState = new Map();
+// Each request runs for exactly one business. Helpers read it from here, so no
+// query below can forget the business scope.
+const requestContext = new AsyncLocalStorage();
+const currentBusiness = () => requestContext.getStore().business;
+
+// Conversation state lives in chat_sessions, keyed by (business, session). This
+// Map is only the working copy for the request in flight.
+const workingState = new Map();
+const stateKey = (sessionId) => `${currentBusiness().id}:${sessionId}`;
+const sessionState = {
+    get: (sessionId) => workingState.get(stateKey(sessionId)) || undefined,
+    set: (sessionId, value) => workingState.set(stateKey(sessionId), value),
+    delete: (sessionId) => workingState.set(stateKey(sessionId), null),
+};
+
+async function loadSessionState(sessionId) {
+    const result = await query('SELECT state FROM chat_sessions WHERE business_id = $1 AND session_id = $2',
+        [currentBusiness().id, sessionId]);
+    workingState.set(stateKey(sessionId), result.rows[0]?.state || null);
+}
+
+async function persistSessionState(sessionId) {
+    const key = stateKey(sessionId);
+    const state = workingState.get(key);
+    workingState.delete(key);
+    if (state && Object.keys(state).length) {
+        await query(
+            `INSERT INTO chat_sessions (business_id, session_id, state) VALUES ($1, $2, $3::jsonb)
+             ON CONFLICT (business_id, session_id) DO UPDATE SET state = EXCLUDED.state, updated_at = NOW()`,
+            [currentBusiness().id, sessionId, JSON.stringify(state)]);
+    } else {
+        await query('DELETE FROM chat_sessions WHERE business_id = $1 AND session_id = $2', [currentBusiness().id, sessionId]);
+    }
+}
+
+/** Save conversation state before the response leaves, on every exit path. */
+function persistBeforeResponding(res, sessionId) {
+    const send = res.json.bind(res);
+    res.json = (body) => {
+        persistSessionState(sessionId)
+            .catch((err) => console.error('[chat state]', err.message))
+            .finally(() => send(body));
+        return res;
+    };
+}
+
+const GUEST_ACTOR = { label: 'guest (chat)' };
+const LOOKUP_STATUSES = ['pending', 'confirmed', 'modified', 'awaiting_confirmation'];
+const SERVICE_NAMES = { hotel: 'hotel room', restaurant: 'restaurant table', meeting: 'meeting room' };
 
 function getTodayFormatted() {
-    return calendarToday();
+    return calendarToday(new Date(), currentBusiness().timezone);
 }
 
 function normalizeDate(input) {
@@ -46,14 +99,19 @@ function formatDate(date) {
 
 function normalizeBooking(booking) {
     if (!booking) return booking;
-    // A recovered reservation must not expose the original chat's access ID.
-    const { session_id, ...details } = booking;
+    // Reservations come from the booking layer already stripped of the
+    // original chat's access ID; flatten them into the conversation state.
+    const { session_id, deposit, resource, resource_type, ...details } = booking;
     return {
         ...details,
         phone_number: booking.contact_phone ?? booking.phone_number ?? '',
         date: formatDate(booking.date),
         end_date: formatDate(booking.end_date),
-        // Ensure times are trimmed/formatted if needed, but usually they are OK strings
+        deposit_status: deposit?.status,
+        deposit_amount: deposit?.amount,
+        // Only an actually assigned room/table is ever named.
+        resource_code: resource?.code || null,
+        resource_type_name: resource_type?.name || null,
     };
 }
 
@@ -150,7 +208,7 @@ function getRequiredFields(intent, data) {
     }
 }
 
-function buildBookingSummaryMessage(intent, data) {
+function buildBookingSummaryMessage(intent, data, closing = 'Shall I go ahead and confirm this for you?') {
     const nameText = data.reservation_name ? ` under the name ${data.reservation_name}` : '';
     const phoneText = data.phone_number ? `, with phone number ${data.phone_number}` : '';
     const optionText = data.inventory_option?.name
@@ -160,15 +218,15 @@ function buildBookingSummaryMessage(intent, data) {
             : '';
 
     if (intent === 'book_hotel') {
-        return `I'd be delighted to help with your hotel room booking. You're checking in on ${data.date}, and your check-out date is ${data.end_date}. There will be ${data.people} guests in total${nameText}${phoneText}.${optionText} Shall I go ahead and confirm this for you?`;
+        return `I'd be delighted to help with your hotel room booking. You're checking in on ${data.date}, and your check-out date is ${data.end_date}. There will be ${data.people} guests in total${nameText}${phoneText}.${optionText}${closing ? ` ${closing}` : ''}`;
     }
 
     if (intent === 'book_restaurant') {
-        return `I'd be delighted to help with your restaurant booking. I have ${data.people} guests for ${data.date} at ${data.start_time}${nameText}${phoneText}.${optionText} Shall I go ahead and confirm this for you?`;
+        return `I'd be delighted to help with your restaurant booking. I have ${data.people} guests for ${data.date} at ${data.start_time}${nameText}${phoneText}.${optionText}${closing ? ` ${closing}` : ''}`;
     }
 
     if (intent === 'book_meeting') {
-        return `I'd be delighted to help with your meeting room booking. I have ${data.people} guests for ${data.date} from ${data.start_time} to ${data.end_time}${nameText}${phoneText}.${optionText} Shall I go ahead and confirm this for you?`;
+        return `I'd be delighted to help with your meeting room booking. I have ${data.people} guests for ${data.date} from ${data.start_time} to ${data.end_time}${nameText}${phoneText}.${optionText}${closing ? ` ${closing}` : ''}`;
     }
 
     return '';
@@ -512,30 +570,39 @@ function extractLookupCorrections(message, todayFormatted) {
 
 async function findBookingForLookup(session_id, criteria) {
     const result = await query(
-        `SELECT * FROM bookings
-         WHERE session_id = $1
-           AND status IN ('pending', 'confirmed', 'modified')
-           AND ($2 = '' OR service_type = $2)
-           AND ($3 = '' OR date = NULLIF($3, '')::date)
-           AND ($4 = '' OR LOWER(reservation_name) = LOWER($4))
-         ORDER BY created_at DESC LIMIT 11`,
-        [session_id, criteria.service_type || '', parseDate(criteria.date) || '', criteria.reservation_name || '']
+        `${RESERVATION_SELECT}
+         WHERE b.business_id = $5 AND b.session_id = $1
+           AND b.status = ANY($6::text[])
+           AND ($2 = '' OR b.service_type = $2)
+           AND ($3 = '' OR b.date = NULLIF($3, '')::date)
+           AND ($4 = '' OR LOWER(b.reservation_name) = LOWER($4))
+         ORDER BY b.created_at DESC, b.id LIMIT 11`,
+        [session_id, criteria.service_type || '', parseDate(criteria.date) || '', criteria.reservation_name || '',
+            currentBusiness().id, LOOKUP_STATUSES]
     );
 
-    return result.rows;
+    return result.rows.map(shapeReservation);
 }
 
+// Recovery from another conversation needs the booking's own phone number and
+// never crosses into another business.
 async function findRecoveredBooking(criteria, phone) {
     const result = await query(
-        `SELECT * FROM bookings
-         WHERE status IN ('pending', 'confirmed', 'modified')
-           AND service_type = $1 AND ($2 = '' OR date = NULLIF($2, '')::date)
-           AND LOWER(reservation_name) = LOWER($3)
-           AND regexp_replace(COALESCE(contact_phone, ''), '[^0-9]', '', 'g') = $4
-         ORDER BY created_at DESC LIMIT 11`,
-        [criteria.service_type, parseDate(criteria.date) || '', criteria.reservation_name, phone.replace(/\D/g, '')]
+        `${RESERVATION_SELECT}
+         WHERE b.business_id = $5 AND b.status = ANY($6::text[])
+           AND b.service_type = $1 AND ($2 = '' OR b.date = NULLIF($2, '')::date)
+           AND LOWER(b.reservation_name) = LOWER($3)
+           AND regexp_replace(COALESCE(b.contact_phone, ''), '[^0-9]', '', 'g') = $4
+         ORDER BY b.created_at DESC, b.id LIMIT 11`,
+        [criteria.service_type, parseDate(criteria.date) || '', criteria.reservation_name, phone.replace(/\D/g, ''),
+            currentBusiness().id, LOOKUP_STATUSES]
     );
-    return result.rows;
+    return result.rows.map(shapeReservation);
+}
+
+async function findActiveReservation(bookingId) {
+    const reservation = await booking.getReservation(currentBusiness(), bookingId).catch(() => null);
+    return reservation && LOOKUP_STATUSES.includes(reservation.status) ? reservation : null;
 }
 
 function reservationChoices(bookings) {
@@ -557,11 +624,8 @@ async function respondToBookingLookup({ res, session_id, message, sessionToken, 
     let matches = [];
     if (lookup.valid) {
         if (selectedBookingId) {
-            const selected = await query(
-                `SELECT * FROM bookings WHERE id = $1 AND status IN ('pending', 'confirmed', 'modified')`,
-                [selectedBookingId]
-            );
-            matches = selected.rows;
+            const selected = await findActiveReservation(selectedBookingId);
+            matches = selected ? [selected] : [];
         } else {
             matches = await findBookingForLookup(session_id, criteria);
             if (!matches.length && phone) matches = await findRecoveredBooking(criteria, phone);
@@ -571,26 +635,26 @@ async function respondToBookingLookup({ res, session_id, message, sessionToken, 
     let state;
     let reply;
     let missing;
-    const booking = matches.length === 1 ? matches[0] : null;
+    const found = matches.length === 1 ? matches[0] : null;
     const searchState = {
         service_type: criteria.service_type || '', service_candidates: criteria.service_candidates || [],
         date: criteria.date || '', reservation_name: criteria.reservation_name || '',
         date_invalid: criteria.date_invalid || false,
         modify_mode: 'modify_booking', lookup_action: action,
     };
-    if (booking) {
+    if (found) {
         state = {
-            ...normalizeBooking(booking), modify_mode: 'modify_booking', modify_step: 'choose_field',
-            edit_booking_id: booking.id, lookup_action: action, modify_missing: null,
+            ...normalizeBooking(found), modify_mode: 'modify_booking', modify_step: 'choose_field',
+            edit_booking_id: found.id, lookup_action: action, modify_missing: null,
         };
         missing = [];
-        reply = `I've found your ${booking.service_type} reservation for ${state.date} under the name "${booking.reservation_name}". `
+        reply = `I've found your ${found.service_type} reservation for ${state.date} under the name "${found.reservation_name}". `
             + (action === 'cancel' ? 'Would you like to proceed with the cancellation?'
                 : 'What would you like to alter? You can say date, time, guests, phone number, notes, or name.');
         if (action !== 'cancel' && wantsReservationSlip(message) && !wantsExistingReservationChange(message)) {
-            reply = booking.people != null
-                ? `Here is your reservation slip for ${booking.reservation_name}. You booked ${booking.people} guests for ${booking.service_type} on ${state.date}.`
-                : `Here is your reservation slip for ${booking.reservation_name}. I have your ${booking.service_type} reservation on ${state.date}, but the guest count was not stored.`;
+            reply = found.people != null
+                ? `Here is your reservation slip for ${found.reservation_name}. You booked ${found.people} guests for ${found.service_type} on ${state.date}.`
+                : `Here is your reservation slip for ${found.reservation_name}. I have your ${found.service_type} reservation on ${state.date}, but the guest count was not stored.`;
         }
     } else if (matches.length > 10) {
         missing = ['date'];
@@ -600,7 +664,7 @@ async function respondToBookingLookup({ res, session_id, message, sessionToken, 
         missing = ['reservation selection'];
         const options = reservationChoices(matches);
         state = { ...searchState, modify_step: 'awaiting_selection', modify_missing: missing,
-            reservation_options: options, lookup_candidate_ids: matches.map((booking) => booking.id) };
+            reservation_options: options, lookup_candidate_ids: matches.map((match) => match.id) };
         reply = buildReservationChoicesMessage(options);
         if (action === 'cancel') reply = reply.replace('alter', 'cancel');
     } else {
@@ -616,8 +680,8 @@ async function respondToBookingLookup({ res, session_id, message, sessionToken, 
     const { lookup_candidate_ids, ...publicState } = state;
     return res.json({
         intent, message: reply, speak: reply, data: publicState, missing_fields: missing,
-        confidence: booking ? 1 : 0.9,
-        ...(booking ? action === 'cancel' ? { show_cancel_confirm: true } : { show_reservation_slip: true } : {}),
+        confidence: found ? 1 : 0.9,
+        ...(found ? action === 'cancel' ? { show_cancel_confirm: true } : { show_reservation_slip: true } : {}),
         session_token: sessionToken,
     });
 }
@@ -642,28 +706,84 @@ function selectReservationOption(message, options, today) {
 
 async function loadLatestSessionBooking(session_id) {
     const result = await query(
-        `SELECT * FROM bookings
-         WHERE session_id = $1 AND status IN ('pending', 'confirmed', 'modified')
-         ORDER BY created_at DESC LIMIT 1`,
-        [session_id]
+        `${RESERVATION_SELECT}
+         WHERE b.business_id = $2 AND b.session_id = $1 AND b.status = ANY($3::text[])
+         ORDER BY b.created_at DESC LIMIT 1`,
+        [session_id, currentBusiness().id, LOOKUP_STATUSES]
     );
 
-    return result.rows[0] || null;
+    return shapeReservation(result.rows[0]) || null;
 }
 
 async function saveConversation(session_id, userMessage, assistantMessage) {
     await query(
-        'INSERT INTO conversations (session_id, role, content) VALUES ($1, $2, $3)',
-        [session_id, 'user', userMessage]
-    );
-
-    await query(
-        'INSERT INTO conversations (session_id, role, content) VALUES ($1, $2, $3)',
-        [session_id, 'assistant', assistantMessage]
+        `INSERT INTO conversations (business_id, session_id, role, content)
+         VALUES ($1, $2, 'user', $3), ($1, $2, 'assistant', $4)`,
+        [currentBusiness().id, session_id, userMessage, assistantMessage]
     );
 }
 
-router.post('/', async (req, res) => {
+function buildBookingRequest(serviceType, data, state) {
+    const preference = data.preferred_inventory || state.preferred_inventory;
+    return {
+        service_type: serviceType,
+        date: parseDate(data.date) || data.date,
+        ...(serviceType === 'hotel' ? { end_date: parseDate(data.end_date) || data.end_date } : { start_time: data.start_time }),
+        // A table sitting uses the venue's configured duration, not a guessed end time.
+        ...(serviceType === 'meeting' && data.end_time ? { end_time: data.end_time } : {}),
+        people: Number(data.people),
+        ...(preference ? { preference } : {}),
+    };
+}
+
+async function findDuplicateBooking(request, data) {
+    const result = await query(
+        `${RESERVATION_SELECT}
+         WHERE b.business_id = $1 AND b.service_type = $2 AND b.status IN ('pending', 'confirmed', 'modified')
+           AND b.date = $3::date AND LOWER(b.reservation_name) = LOWER($4)`,
+        [currentBusiness().id, request.service_type, request.date, data.reservation_name || '']
+    );
+    const phone = String(data.phone_number || '').replace(/\D/g, '');
+    return result.rows.map(shapeReservation).find((existing) => {
+        const existingPhone = String(existing.contact_phone || '').replace(/\D/g, '');
+        if (phone && existingPhone && phone !== existingPhone) return false;
+        if (request.service_type === 'hotel') return existing.end_date === request.end_date;
+        return String(existing.start_time || '').slice(0, 5) === String(request.start_time || '').slice(0, 5).padStart(5, '0');
+    }) || null;
+}
+
+/** Plain-language explanation of a booking-layer failure. Never claims success. */
+function bookingFailureMessage(err, unchangedNote = '') {
+    const note = unchangedNote ? ` ${unchangedNote}` : '';
+    if (err?.name === 'ZodError') {
+        return `Some of those details don't look right (${[...new Set(err.issues.map((issue) => issue.path[0]))].join(', ')}). Could you give them to me again?`;
+    }
+    if (err.code === 'provider_unavailable' || err.code === 'provider_error') {
+        return `I'm sorry — I can't reach our reservation system right now, so I can't check or confirm this.${note} Nothing has been booked. Please try again in a few minutes or contact us directly.`;
+    }
+    if (err.code === 'unsupported_operation') return `${err.message}${note}`;
+    return `${err.message}${note}`;
+}
+
+const isBookingFailure = (err) => err instanceof BookingError || err?.name === 'ZodError';
+
+function toServiceChanges(assignments) {
+    const changes = { ...assignments };
+    for (const field of ['date', 'end_date']) if (field in changes) changes[field] = parseDate(changes[field]) || changes[field];
+    delete changes.waitlisted;
+    return changes;
+}
+
+function syncSentence(calendarSync) {
+    return calendarSync.status === 'synced' ? ' Google Calendar has been updated.'
+        : calendarSync.status === 'disabled' || calendarSync.status === 'not_required' ? ''
+            : ' Google Calendar could not be updated yet; it will be retried automatically.';
+}
+
+router.post('/', resolveGuestBusiness, (req, res) => requestContext.run({ business: req.business }, () => handleChat(req, res)));
+
+async function handleChat(req, res) {
+    const business = currentBusiness();
     const { session_id, message, auth_token } = req.body;
 
     if (!session_id || !message) {
@@ -672,7 +792,7 @@ router.post('/', async (req, res) => {
 
     let sessionToken;
     try {
-        sessionToken = createSessionToken(session_id);
+        sessionToken = createSessionToken(business.id, session_id);
     } catch (err) {
         console.error('[POST /api/chat] Missing session signing secret:', err.message);
         return res.status(503).json({
@@ -682,9 +802,12 @@ router.post('/', async (req, res) => {
     }
 
     try {
+        await loadSessionState(session_id);
+        persistBeforeResponding(res, session_id);
+        const offered = await bookableServices(business);
         const historyResult = await query(
-            'SELECT role, content FROM conversations WHERE session_id = $1 ORDER BY created_at ASC',
-            [session_id]
+            'SELECT role, content FROM conversations WHERE business_id = $2 AND session_id = $1 ORDER BY created_at ASC, id ASC',
+            [session_id, business.id]
         );
 
         const history = historyResult.rows.slice(-10);
@@ -705,8 +828,8 @@ router.post('/', async (req, res) => {
         let identifiedCustomer = null;
         if (state.phone_number) {
             const customerResult = await query(
-                'SELECT name, preferences FROM customers WHERE phone_number = $1',
-                [state.phone_number]
+                'SELECT name, preferences FROM customers WHERE business_id = $2 AND phone_number = $1',
+                [state.phone_number, business.id]
             );
             if (customerResult.rows.length > 0) {
                 const customer = customerResult.rows[0];
@@ -865,7 +988,18 @@ router.post('/', async (req, res) => {
                     missing_fields: [], confidence: 1, session_token: sessionToken });
             }
 
-            const { changes, missing } = extractModifyChanges(normalizedMessage, today, state);
+            let changes;
+            let missing;
+            if (state.modify_step === 'confirm_requote' && /^(?:yes|yes please|sure|of course|go ahead|please do|ok|okay)[.!]?$/i.test(normalizedMessage.trim())) {
+                // The guest accepted the new terms that were just read out.
+                changes = state.modify_updates || {};
+                missing = [];
+            } else {
+                if (state.modify_step === 'confirm_requote') {
+                    state = { ...state, modify_step: 'choose_field', modify_updates: null, accepted_requote_hash: null };
+                }
+                ({ changes, missing } = extractModifyChanges(normalizedMessage, today, state));
+            }
             const requestedField = detectModifyField(normalizedMessage) || state.modify_field;
             if (missing.length > 0 || Object.keys(changes).length === 0) {
                 const field = missing[0] || requestedField;
@@ -898,18 +1032,15 @@ router.post('/', async (req, res) => {
                 });
             }
 
-            const latestSelected = await query(
-                `SELECT * FROM bookings WHERE id = $1 AND status IN ('pending', 'confirmed', 'modified')`,
-                [editBookingId]
-            );
-            if (!latestSelected.rows.length) {
+            const currentReservation = await findActiveReservation(editBookingId);
+            if (!currentReservation) {
                 sessionState.delete(session_id);
                 const reply = 'That reservation is no longer active. Please find the reservation you would like to alter again.';
                 await saveConversation(session_id, message, reply);
                 return res.json({ intent: 'modify_booking', message: reply, speak: reply, data: null,
                     missing_fields: [], confidence: 1, session_token: sessionToken });
             }
-            state = { ...state, ...normalizeBooking(latestSelected.rows[0]) };
+            state = { ...state, ...normalizeBooking(currentReservation) };
 
             // Moving hotel arrival dates keeps the existing number of nights unless
             // the guest also supplies a new checkout date.
@@ -929,7 +1060,29 @@ router.post('/', async (req, res) => {
                 });
             }
 
-            const validation = await validateBookingAlteration(latestSelected.rows[0], changes);
+            // A hotel's check-in and check-out times are property policy, not
+            // something a guest can move. A requested time is kept as a note.
+            let hotelTimeNote = '';
+            if (currentReservation.service_type === 'hotel' && (changes.start_time || changes.end_time)) {
+                const requested = String(changes.start_time || '').slice(0, 5);
+                delete changes.start_time;
+                delete changes.end_time;
+                hotelTimeNote = ` Check-in is from ${String(currentReservation.start_time).slice(0, 5)} and check-out by ${String(currentReservation.end_time).slice(0, 5)}`
+                    + (requested ? `; I've noted your requested arrival time of ${requested}.` : '.');
+                if (requested) {
+                    changes.notes = [changes.notes ?? currentReservation.notes, `Requested arrival time ${requested}`].filter(Boolean).join(' | ');
+                }
+                if (!Object.keys(changes).length) {
+                    state = { ...state, modify_step: 'choose_field', modify_field: null, modify_updates: null };
+                    sessionState.set(session_id, state);
+                    const reply = `${hotelTimeNote.trim()} Is there anything else you would like to change?`;
+                    await saveConversation(session_id, message, reply);
+                    return res.json({ intent: 'modify_booking', message: reply, speak: reply, data: state,
+                        missing_fields: [], confidence: 1, session_token: sessionToken });
+                }
+            }
+
+            const validation = normalizeBookingAlteration(currentReservation, changes);
             if (!validation.valid) {
                 state = { ...state, modify_step: 'choose_field', modify_field: null, modify_updates: null };
                 sessionState.set(session_id, state);
@@ -938,64 +1091,52 @@ router.post('/', async (req, res) => {
                     data: state, missing_fields: [], confidence: 1, session_token: sessionToken });
             }
             const finalChanges = validation.assignments;
-            const columns = Object.keys(finalChanges);
-            const values = columns.map((column) => column === 'date' || column === 'end_date'
-                ? parseDate(finalChanges[column]) : finalChanges[column]);
-            const assignments = columns.map((column, index) => `${column} = $${index + 1}`).join(', ');
-            const updated = await query(
-                `UPDATE bookings SET ${assignments}, status = CASE WHEN status = 'confirmed' THEN 'modified' ELSE status END, updated_at = NOW()
-                 WHERE id = $${values.length + 1} AND status IN ('pending', 'confirmed', 'modified') RETURNING *`,
-                [...values, editBookingId]
-            );
-            if (updated.rows.length === 0) {
-                const msg = "I couldn't update that booking just now. Please try again.";
-                await saveConversation(session_id, message, msg);
-                return res.json({
-                    intent: 'modify_booking', message: msg, speak: msg, data: state,
-                    missing_fields: [], confidence: 0.4, session_token: sessionToken,
-                });
+            // Availability, capacity, price and the write itself are decided by
+            // the booking layer in one transaction. A failure changes nothing.
+            let outcome;
+            try {
+                outcome = await booking.modifyReservation(business, editBookingId, toServiceChanges(finalChanges),
+                    { ...(state.accepted_requote_hash ? { accepted_quote_hash: state.accepted_requote_hash } : {}) }, GUEST_ACTOR);
+            } catch (err) {
+                if (!isBookingFailure(err)) throw err;
+                let reply;
+                if (err.code === 'quote_changed') {
+                    state = { ...state, modify_step: 'confirm_requote', modify_field: null, modify_updates: changes,
+                        accepted_requote_hash: err.details.quote.hash };
+                    reply = `That change would alter your booking terms. ${describeQuote(err.details.quote)} Your reservation has not been changed yet — shall I go ahead?`;
+                } else {
+                    state = { ...state, modify_step: 'choose_field', modify_field: null, modify_updates: null, accepted_requote_hash: null };
+                    reply = bookingFailureMessage(err, err.code === 'conflict' ? 'Please choose a different date, time, or guest count.' : 'Your reservation has not been changed.');
+                }
+                sessionState.set(session_id, state);
+                await saveConversation(session_id, message, reply);
+                return res.json({ intent: 'modify_booking', message: reply, speak: reply, data: state,
+                    missing_fields: [], confidence: 1, session_token: sessionToken });
             }
 
-            const rawBooking = updated.rows[0];
-            // Legacy confirmed reservations can retain a waitlist flag. Keep an
-            // existing event current; only a waitlist without an event skips sync.
-            const needsCalendarSync = !rawBooking.waitlisted || Boolean(rawBooking.google_event_id);
-            let calendarSync = { status: !needsCalendarSync ? 'not_required' : isCalendarSyncEnabled() ? 'failed' : 'disabled' };
-            if (needsCalendarSync && calendarSync.status !== 'disabled') {
-                try {
-                    const eventId = await upsertEvent(rawBooking);
-                    if (eventId) {
-                        if (eventId !== rawBooking.google_event_id) {
-                            await query('UPDATE bookings SET google_event_id = $1 WHERE id = $2', [eventId, rawBooking.id]);
-                            rawBooking.google_event_id = eventId;
-                        }
-                        calendarSync = { status: 'synced' };
-                    }
-                } catch (calendarErr) {
-                    console.error('[chat booking sync]', calendarErr.message);
-                }
-            }
-            const booking = normalizeBooking(rawBooking);
+            const calendarSync = outcome.calendar_sync;
+            const stillWaitlisted = outcome.reservation.waitlisted && calendarSync.status !== 'synced' && calendarSync.status !== 'failed';
+            const booking_ = normalizeBooking(outcome.reservation);
             state = {
-                ...state, ...booking, calendar_sync: calendarSync,
+                ...state, ...booking_, calendar_sync: calendarSync,
                 modify_mode: 'modify_booking', modify_step: 'anything_else',
-                modify_field: null, modify_updates: null, edit_booking_id: booking.id,
+                modify_field: null, modify_updates: null, accepted_requote_hash: null, edit_booking_id: booking_.id,
             };
             sessionState.set(session_id, state);
             const changedDetails = [];
-            if (changes.date) changedDetails.push(`date ${booking.date}`);
-            if (changes.end_date) changedDetails.push(`check-out ${booking.end_date}`);
-            if (changes.people) changedDetails.push(`${booking.people} guests`);
-            if (changes.contact_phone) changedDetails.push(`phone ${booking.phone_number}`);
-            if (changes.start_time) changedDetails.push(`time ${booking.start_time}`);
-            if (finalChanges.end_time) changedDetails.push(`end time ${booking.end_time}`);
-            if (changes.reservation_name) changedDetails.push(`name ${booking.reservation_name}`);
+            if (changes.date) changedDetails.push(`date ${booking_.date}`);
+            if (changes.end_date) changedDetails.push(`check-out ${booking_.end_date}`);
+            if (changes.people) changedDetails.push(`${booking_.people} guests`);
+            if (changes.contact_phone) changedDetails.push(`phone ${booking_.phone_number}`);
+            if (changes.start_time) changedDetails.push(`time ${booking_.start_time}`);
+            if (finalChanges.end_time) changedDetails.push(`end time ${booking_.end_time}`);
+            if (changes.reservation_name) changedDetails.push(`name ${booking_.reservation_name}`);
             if (changes.notes) changedDetails.push('notes saved');
-            const syncMessage = calendarSync.status === 'synced' ? ' Google Calendar has been updated.'
-                : calendarSync.status === 'not_required' ? ' Your reservation remains on the waitlist.'
-                : calendarSync.status === 'disabled' ? ' Google Calendar sync is disabled; your booking changes are saved.'
-                    : ' Your booking changes are saved, but Google Calendar could not be updated.';
-            const msg = `I've updated your ${booking.service_type} reservation: ${changedDetails.join(', ')}.${syncMessage} Is there anything else I can help you with?`;
+            const syncMessage = stillWaitlisted ? ' Your reservation remains on the waitlist.'
+                : calendarSync.status === 'synced' ? ' Google Calendar has been updated.'
+                    : calendarSync.status === 'disabled' || calendarSync.status === 'not_required' ? ' Google Calendar sync is disabled; your booking changes are saved.'
+                        : ' Your booking changes are saved, but Google Calendar could not be updated yet. It will be retried automatically.';
+            const msg = `I've updated your ${booking_.service_type} reservation: ${changedDetails.join(', ')}.${hotelTimeNote}${syncMessage} Is there anything else I can help you with?`;
             await saveConversation(session_id, message, msg);
             return res.json({
                 intent: 'modify_booking', message: msg, speak: msg, data: state,
@@ -1003,7 +1144,12 @@ router.post('/', async (req, res) => {
             });
         }
 
-        const llmResponse = await chat(history, normalizedMessage, today, state, memoryContext);
+        // The model is told what this business offers, but nothing it says is
+        // trusted for prices, availability or rules — the backend decides those.
+        const businessContext = `[BUSINESS] You are the receptionist for "${business.name}". `
+            + `Bookable services right now: ${offered.length ? offered.join(', ') : 'none (online booking is not open)'}. `
+            + 'Do not offer any other service. Never state prices, availability, or room/table numbers yourself; the system adds verified details.';
+        const llmResponse = await chat(history, normalizedMessage, today, state, `${businessContext}${memoryContext}`);
 
         const validation = validateBookingResponse(llmResponse);
         const parsed = validation.data;
@@ -1118,15 +1264,7 @@ router.post('/', async (req, res) => {
 
         sessionState.set(session_id, state);
 
-        await query(
-            'INSERT INTO conversations (session_id, role, content) VALUES ($1, $2, $3)',
-            [session_id, 'user', message]
-        );
-
-        await query(
-            'INSERT INTO conversations (session_id, role, content) VALUES ($1, $2, $3)',
-            [session_id, 'assistant', parsed.message]
-        );
+        await saveConversation(session_id, message, parsed.message);
 
         const { intent } = parsed;
         const data = state;
@@ -1134,9 +1272,29 @@ router.post('/', async (req, res) => {
         const bookableIntents = ['book_restaurant', 'book_hotel', 'book_meeting'];
         let availability = null;
 
+        let requiresConfirmation = false;
+        let bookingReply = '';
+
         if (bookableIntents.includes(intent)) {
             state.duplicate_blocked = false;
             state.duplicate_booking_id = null;
+            // A draft never reserves inventory. It is rebuilt from scratch on
+            // every message and re-checked again at confirmation.
+            state.draft = null;
+            state.quote = null;
+            state.waitlisted = undefined;
+
+            const serviceType = data.service_type || intent.replace('book_', '');
+            // Which services can be booked is enforced here, not by the model.
+            if (!offered.includes(serviceType)) {
+                const reply = offered.length
+                    ? `I'm sorry, we don't take ${SERVICE_NAMES[serviceType] || serviceType} reservations here. I can help with ${offered.map((item) => SERVICE_NAMES[item]).join(' or ')} bookings.`
+                    : "I'm sorry, online booking isn't open for this venue yet. Please contact us directly.";
+                state = { reservation_name: state.reservation_name || '', phone_number: state.phone_number || '' };
+                sessionState.set(session_id, state);
+                return res.json({ ...parsed, intent: 'unknown', message: reply, speak: reply, data: state,
+                    missing_fields: [], requires_confirmation: false, session_token: sessionToken });
+            }
 
             const check = getRequiredFields(intent, data);
 
@@ -1147,106 +1305,26 @@ router.post('/', async (req, res) => {
                     message: missingText,
                     speak: missingText,
                     missing_fields: check.missing,
+                    requires_confirmation: false,
                     session_token: sessionToken,
                 });
             }
 
-            const parsedDate = parseDate(data.date);
-            let parsedEndDate = null;
-
-            let startTime = parseTime(data.start_time);
-            let endTime = parseTime(data.end_time);
-
-            if (intent === 'book_hotel') {
-                // For hotels, end_date is the checkout date
-                parsedEndDate = parseDate(data.end_date);
-                startTime = startTime || '14:00:00';
-                endTime = endTime || '11:00:00';
-            }
-
-            if (!startTime) startTime = '12:00';
-            if (!endTime) {
-                const [h, m] = startTime.split(':').map(Number);
-                endTime = `${String((h + 1) % 24).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
-            }
-
-            let targetId = state.id;
-
-            // If we don't have a target ID in state, look for a pending one in this session
-            if (!targetId) {
-                const existing = await query(
-                    `SELECT id, google_event_id, status, service_type, date, start_time, end_time, people, notes, reservation_name FROM bookings 
-                     WHERE session_id = $1 AND status = 'pending'
-                     ORDER BY created_at DESC LIMIT 1`,
-                    [session_id]
-                );
-                if (existing.rows.length > 0) {
-                    targetId = existing.rows[0].id;
-                    // Keep existing values as defaults if not in current state
-                    state = { ...normalizeBooking(existing.rows[0]), ...state };
-                }
-            }
-
-            // Availability check — mark waitlist if no inventory
+            const request = buildBookingRequest(serviceType, data, state);
+            let result;
             try {
-                availability = await checkAvailability({
-                    service_type: data.service_type || intent.replace('book_', ''),
-                    date: data.date,
-                    end_date: data.end_date,
-                    start_time: startTime,
-                    end_time: endTime,
-                    people: data.people,
-                    preferred_inventory: data.preferred_inventory || state.preferred_inventory,
-                    exclude_booking_id: targetId || state.id,
-                });
-                state.waitlisted = availability.waitlist;
-                const serviceType = data.service_type || intent.replace('book_', '');
-                state.hotel_room_id = null;
-                state.table_id = null;
-                state.meeting_room_id = null;
-                if (serviceType === 'hotel') {
-                    state.hotel_room_id = availability.selected_option?.id || null;
-                } else if (serviceType === 'restaurant') {
-                    state.table_id = availability.selected_option?.id || null;
-                } else if (serviceType === 'meeting') {
-                    state.meeting_room_id = availability.selected_option?.id || null;
-                }
-                state.inventory_id = availability.selected_option?.id || null;
-                state.inventory_option = availability.selected_option || null;
-                if (availability.waitlist) {
-                    const alt = await findAlternativeAvailability({
-                        service_type: data.service_type || intent.replace('book_', ''),
-                        date: data.date,
-                        end_date: data.end_date,
-                        start_time: startTime,
-                        end_time: endTime,
-                        people: data.people,
-                        preferred_inventory: data.preferred_inventory || state.preferred_inventory,
-                    });
-                    if (alt) {
-                        state.alternative = alt;
-                    }
-                } else {
-                    state.alternative = null;
-                }
-            } catch (availErr) {
-                console.error('[chat availability]', availErr);
+                result = await booking.checkAvailability(business, request);
+            } catch (err) {
+                if (!isBookingFailure(err)) throw err;
+                // No availability answer means no confirmation step at all.
+                const reply = bookingFailureMessage(err);
+                state = { ...state, inventory_option: null, alternative: null };
+                sessionState.set(session_id, state);
+                return res.json({ ...parsed, message: reply, speak: reply, data: state, missing_fields: [],
+                    requires_confirmation: false, availability_error: err.code || 'validation', session_token: sessionToken });
             }
 
-            const duplicate = await findDuplicateBooking({
-                service_type: data.service_type || (intent.startsWith('book_') ? intent.replace('book_', '') : ''),
-                date: parsedDate,
-                end_date: parsedEndDate,
-                start_time: startTime,
-                end_time: endTime,
-                reservation_name: data.reservation_name,
-                contact_phone: data.phone_number || state.phone_number || null,
-                hotel_room_id: state.hotel_room_id || null,
-                table_id: state.table_id || null,
-                meeting_room_id: state.meeting_room_id || null,
-                exclude_booking_id: targetId,
-            });
-
+            const duplicate = await findDuplicateBooking(request, data);
             if (duplicate) {
                 state = {
                     ...state,
@@ -1255,96 +1333,37 @@ router.post('/', async (req, res) => {
                     duplicate_blocked: true,
                 };
                 sessionState.set(session_id, state);
-                const duplicateMessage = `I found an existing ${duplicate.service_type} booking for ${data.reservation_name} at that same date and time, so I won't create a duplicate.`;
-                parsed.message = duplicateMessage;
-                parsed.speak = duplicateMessage;
-            } else if (targetId) {
-                const updated = await query(
-                    `UPDATE bookings SET
-                        service_type = $1,
-                        date = $2,
-                        end_date = $3,
-                        start_time = $4,
-                        end_time = $5,
-                        people = $6,
-                        notes = $7,
-                        reservation_name = $8,
-                        waitlisted = $9,
-                        hotel_room_id = $10,
-                        table_id = $11,
-                        meeting_room_id = $12,
-                        status = CASE WHEN status = 'confirmed' THEN 'modified' ELSE status END,
-                        updated_at = NOW()
-                      WHERE id = $13 RETURNING *`,
-                    [
-                        data.service_type || (intent.startsWith('book_') ? intent.replace('book_', '') : ''),
-                        parsedDate,
-                        parsedEndDate,
-                        startTime,
-                        endTime,
-                        data.people,
-                        data.notes,
-                        data.reservation_name,
-                        state.waitlisted || false,
-                        state.hotel_room_id || null,
-                        state.table_id || null,
-                        state.meeting_room_id || null,
-                        targetId,
-                    ]
-                );
-                state = { ...state, ...normalizeBooking(updated.rows[0]) };
-
-                // Premature Sync Removed: confirmation now happens in /confirm
+                bookingReply = `I found an existing ${duplicate.service_type} booking for ${data.reservation_name} at that same date and time, so I won't create a duplicate.`;
+            } else if (result.selected) {
+                state = {
+                    ...state, service_type: serviceType, waitlisted: false, alternative: null,
+                    inventory_id: null, inventory_option: optionSummary(result.selected), quote: result.selected.quote,
+                    draft: { id: uuidv4(), request, quote_hash: result.selected.quote.hash, waitlist: false },
+                };
+                const terms = [`Availability checked: ${result.selected.resource_type.name} is open for this request.`,
+                    describeQuote(result.selected.quote)].filter(Boolean).join(' ');
+                bookingReply = `${buildBookingSummaryMessage(intent, state, '')}\n\n${terms} Shall I go ahead and confirm this for you?`;
+                requiresConfirmation = true;
             } else {
-                // First ensure customer exists/is updated
-                let customerId = null;
-                if (data.phone_number) {
-                    const custResult = await query(
-                        `INSERT INTO customers (phone_number, name)
-                         VALUES ($1, $2)
-                         ON CONFLICT (phone_number) 
-                         DO UPDATE SET name = COALESCE(customers.name, EXCLUDED.name), updated_at = NOW()
-                         RETURNING id`,
-                        [data.phone_number, data.reservation_name]
-                    );
-                    customerId = custResult.rows[0].id;
+                const alternative = toLegacyAlternative(await booking.findAlternatives(business, request).catch(() => null));
+                state = {
+                    ...state, service_type: serviceType, waitlisted: result.waitlist_possible, alternative,
+                    inventory_id: null, inventory_option: null, quote: null,
+                    draft: result.waitlist_possible ? { id: uuidv4(), request, quote_hash: null, waitlist: true } : null,
+                };
+                if (result.waitlist_possible) {
+                    bookingReply = `${buildBookingSummaryMessage(intent, state, '')}\n\nWe're currently full for that exact request.`
+                        + (alternative ? `${buildAlternativeMessage(state)} Do you want to switch to that option or join the waitlist?`
+                            : ' I can add you to the waitlist, or we can try a different date, time, or party size. A waitlist place is not a confirmed booking.');
+                    requiresConfirmation = true;
+                } else {
+                    bookingReply = `I'm sorry, I can't book that as requested: ${result.reason.message}`
+                        + (alternative ? buildAlternativeMessage(state) : ' Could we try different details?');
                 }
-
-                const result = await query(
-                    `INSERT INTO bookings 
-                    (session_id, service_type, date, end_date, start_time, end_time, people, notes, reservation_name, status, customer_id, contact_phone, contact_email, waitlisted, hotel_room_id, table_id, meeting_room_id)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', $10, $11, $12, $13, $14, $15, $16) RETURNING *`,
-                    [
-                        session_id,
-                        data.service_type || (intent.startsWith('book_') ? intent.replace('book_', '') : ''),
-                        parsedDate,
-                        parsedEndDate,
-                        startTime,
-                        endTime,
-                        data.people,
-                        data.notes,
-                        data.reservation_name,
-                        customerId,
-                        data.phone_number || state.phone_number || null,
-                        data.email || null,
-                        state.waitlisted || false,
-                        state.hotel_room_id || null,
-                        state.table_id || null,
-                        state.meeting_room_id || null,
-                    ]
-                );
-
-                // 🔄 Premature Sync Removed: confirmation now happens in /confirm
-                const newBooking = result.rows[0];
-                state = { ...state, ...normalizeBooking(newBooking) };
-                sessionState.set(session_id, state);
             }
-
-            const summaryMessage = state.duplicate_blocked ? '' : buildBookingSummaryMessage(intent, state);
-            if (summaryMessage) {
-                parsed.message = summaryMessage;
-                parsed.speak = summaryMessage;
-            }
+            availability = toLegacyAvailability(result, null);
+            availability.alternative = state.alternative || null;
+            sessionState.set(session_id, state);
         } else if (intent === 'modify_booking' || intent === 'cancel_booking' || intent === 'cancel') {
             // Model-inferred requests follow the same access and verification rules
             // as deterministic lookup; model output is never proof of ownership.
@@ -1353,221 +1372,187 @@ router.post('/', async (req, res) => {
                 action: intent === 'modify_booking' ? 'modify' : 'cancel' });
         }
 
-        // Add friendly message for waitlist with alternatives
-        let responseMessage = parsed.message;
-        if (state.waitlisted && state.alternative) {
-            responseMessage += `\n\nWe're currently full for that exact request.${buildAlternativeMessage(state)} Do you want to switch to that option or join the waitlist?`;
-        } else if (state.waitlisted) {
-            responseMessage += `\n\nWe're currently full for that exact request. I can add you to the waitlist, or we can try a different date, time, or party size.`;
-        } else if (state.inventory_option?.name && bookableIntents.includes(intent)) {
-            responseMessage += `\n\nAvailability checked: ${state.inventory_option.name} is open for this request.`;
-        }
+        const responseMessage = bookingReply || parsed.message;
 
         return res.json({
             ...parsed,
             message: responseMessage,
+            speak: bookingReply || parsed.speak,
             data: state, // always return merged state
-            availability: state.waitlisted !== undefined ? {
-                available: availability?.available,
-                total: availability?.total,
-                waitlist: state.waitlisted,
-                reason: availability?.reason,
-                selected_option: state.inventory_option,
-                occupied_option: availability?.occupied_option,
-                place_recommendation: availability?.place_recommendation,
-                options: availability?.options,
-                other_options: availability?.other_options,
-                alternative: state.alternative,
-            } : undefined,
+            availability: availability || undefined,
+            requires_confirmation: requiresConfirmation,
             session_token: sessionToken,
         });
 
     } catch (err) {
         console.error('[POST /api/chat] CRASH:', err);
-        return res.status(500).json({ 
-            error: 'Something went wrong.', 
-            details: err.message,
-            stack: process.env.NODE_ENV === 'development' ? err.stack : undefined,
+        return res.status(500).json({
+            error: 'Something went wrong.',
             session_token: sessionToken,
         });
     }
-});
+}
 
 // Clear chat context while preserving access to the session's reservations.
-router.post('/reset', requireSessionToken, async (req, res) => {
+router.post('/reset', resolveGuestBusiness, requireSessionToken, (req, res) => requestContext.run({ business: req.business }, async () => {
     const { session_id } = req.body;
     if (!session_id) return res.status(400).json({ error: 'session_id is required' });
     try {
-        await query('DELETE FROM conversations WHERE session_id = $1', [session_id]);
-        sessionState.delete(session_id);
+        await query('DELETE FROM conversations WHERE business_id = $2 AND session_id = $1', [session_id, req.business.id]);
+        await query('DELETE FROM chat_sessions WHERE business_id = $2 AND session_id = $1', [session_id, req.business.id]);
         return res.json({ success: true });
     } catch (err) {
         console.error('[POST /api/chat/reset]', err.message);
         return res.status(500).json({ error: 'Could not clear the conversation. Please try again.' });
     }
-});
+}));
 
-// POST /api/chat/confirm(Finalize the most recent pending booking for this session)
-router.post('/confirm', requireSessionToken, async (req, res) => {
+function confirmationMessage(reservation, calendarSync) {
+    if (reservation.status === 'awaiting_confirmation') {
+        return 'Your request has been sent to our reservation system, but it has not confirmed it yet. '
+            + 'This is not a confirmed booking. Our team will check and get back to you.';
+    }
+    if (reservation.waitlisted) {
+        return "You're on the waitlist. This is not a confirmed booking — we'll contact you if a place opens up.";
+    }
+    const deposit = reservation.deposit?.status === 'due'
+        ? ` A deposit of ${reservation.deposit.amount} ${reservation.currency} is still due; our staff will arrange it with you.` : '';
+    const saved = calendarSync.status === 'synced' ? 'Booking saved and Google Calendar updated.'
+        : calendarSync.status === 'disabled' || calendarSync.status === 'not_required' ? 'Booking saved. Google Calendar sync is disabled.'
+            : 'Booking saved, but Google Calendar could not be updated yet. It will be retried automatically.';
+    return `${saved}${deposit}`;
+}
+
+// POST /api/chat/confirm — the customer's explicit confirmation.
+// Availability is re-checked here, inside the booking transaction; the draft
+// shown in the conversation held nothing.
+router.post('/confirm', resolveGuestBusiness, requireSessionToken, (req, res) => requestContext.run({ business: req.business }, () => handleConfirm(req, res)));
+
+async function handleConfirm(req, res) {
+    const business = currentBusiness();
     const { session_id, action, booking_id: expectedBookingId } = req.body;
-
-    if (!session_id) {
-        return res.status(400).json({ error: 'session_id is required' });
-    }
-
-    let sessionToken;
-    try {
-        sessionToken = createSessionToken(session_id);
-    } catch (err) {
-        console.error('[POST /api/chat/confirm] Missing session signing secret:', err.message);
-        return res.status(503).json({
-            error: 'SESSION_SIGNING_SECRET is required for booking confirmations.',
-            detail: 'Set SESSION_SIGNING_SECRET in backend/.env and restart the backend.',
-        });
-    }
+    const sessionToken = createSessionToken(business.id, session_id);
 
     try {
+        await loadSessionState(session_id);
+        persistBeforeResponding(res, session_id);
+        let state = sessionState.get(session_id) || {};
         // Selection is assigned only after an authorized lookup, and is never
-        // accepted from request JSON. Recovery keeps the booking's original session.
-        const currentState = sessionState.get(session_id);
-        if (['awaiting_lookup', 'awaiting_verification', 'awaiting_selection'].includes(currentState?.modify_step)) {
+        // accepted from request JSON.
+        if (['awaiting_lookup', 'awaiting_verification', 'awaiting_selection'].includes(state.modify_step)) {
             return res.json({ success: false, message: 'Please find and verify the reservation first.', session_token: sessionToken });
         }
-        const selectedId = currentState?.edit_booking_id;
-        const latest = selectedId
-            ? await query(
-                `SELECT * FROM bookings WHERE id = $1 AND status IN ('pending', 'confirmed', 'modified')`,
-                [selectedId]
-            )
-            : await query(
-                `SELECT id, status FROM bookings
-                 WHERE session_id = $1 AND status IN ('pending', 'confirmed', 'modified')
-                 ORDER BY created_at DESC LIMIT 1`,
-                [session_id]
-            );
+        const fail = (message, extra = {}) => res.json({ success: false, message, data: state, session_token: sessionToken, ...extra });
 
-        if (latest.rows.length === 0) {
-            return res.json({ success: false, message: 'No active booking found.', session_token: sessionToken });
+        // ── New reservation from the conversation's draft ──────────────────
+        if (action !== 'cancel' && state.draft) {
+            const draft = state.draft;
+            if (!state.reservation_name) return fail('I still need a name for the reservation.');
+            let outcome;
+            try {
+                outcome = await booking.createReservation(business, {
+                    ...draft.request,
+                    // One key per draft + accepted terms: a double-click or retry
+                    // returns the same reservation instead of creating another.
+                    idempotency_key: `chat:${draft.id}:${draft.quote_hash || 'waitlist'}`,
+                    customer: {
+                        name: state.reservation_name,
+                        ...(state.phone_number ? { phone: state.phone_number } : {}),
+                        ...(state.email ? { email: state.email } : {}),
+                    },
+                    notes: state.notes || '',
+                    channel: 'chat',
+                    session_id,
+                    ...(draft.quote_hash ? { accepted_quote_hash: draft.quote_hash } : {}),
+                    waitlist_if_unavailable: Boolean(draft.waitlist),
+                }, GUEST_ACTOR);
+            } catch (err) {
+                if (!isBookingFailure(err)) throw err;
+                if (err.code === 'quote_changed') {
+                    // Terms moved since they were read out: ask again with the new ones.
+                    state = { ...state, quote: err.details.quote, inventory_option: optionSummary(err.details.option),
+                        draft: { ...draft, quote_hash: err.details.quote.hash } };
+                    sessionState.set(session_id, state);
+                    return fail(`The booking terms have changed since I quoted them. ${describeQuote(err.details.quote)} Would you still like to go ahead?`,
+                        { code: 'quote_changed', requires_confirmation: true });
+                }
+                if (err.code === 'conflict') {
+                    const alternative = toLegacyAlternative(await booking.findAlternatives(business, draft.request).catch(() => null));
+                    const canWaitlist = Boolean(err.details?.waitlist_possible);
+                    state = { ...state, inventory_option: null, quote: null, alternative, waitlisted: canWaitlist,
+                        draft: canWaitlist ? { ...draft, quote_hash: null, waitlist: true } : null };
+                    sessionState.set(session_id, state);
+                    return fail(`I'm sorry — that option was taken while we were talking, so nothing has been booked.`
+                        + (alternative ? buildAlternativeMessage(state) : '')
+                        + (canWaitlist ? ' Would you like that instead, or shall I add you to the waitlist?' : ' Could we try different details?'),
+                    { code: 'unavailable', alternative, requires_confirmation: false });
+                }
+                state = { ...state, draft: err.code === 'validation' ? null : draft };
+                sessionState.set(session_id, state);
+                return fail(bookingFailureMessage(err), { code: err.code || 'validation', requires_confirmation: false });
+            }
+
+            const reservation = outcome.reservation;
+            state = { ...state, ...normalizeBooking(reservation), draft: null, calendar_sync: outcome.calendar_sync,
+                edit_booking_id: reservation.id, modify_mode: null, modify_step: null };
+            sessionState.set(session_id, state);
+            return res.json({
+                success: true,
+                booking_id: reservation.id,
+                status: reservation.display_status,
+                // A slip is only issued for a reservation the authoritative source confirmed.
+                confirmed: reservation.status === 'confirmed',
+                calendar_sync: outcome.calendar_sync,
+                message: confirmationMessage(reservation, outcome.calendar_sync),
+                data: state,
+                session_token: sessionToken,
+            });
         }
 
-        const bookingId = latest.rows[0].id;
-        const currentStatus = latest.rows[0].status;
+        // ── An existing reservation in this session ────────────────────────
+        const selectedId = state.edit_booking_id;
+        const existing = selectedId ? await findActiveReservation(selectedId) : await loadLatestSessionBooking(session_id);
+        if (!existing) return fail('No active booking found.');
         // The displayed reservation must agree with the authorized server
         // selection, including after a restart or a change from another tab.
-        if (expectedBookingId != null && String(expectedBookingId) !== String(bookingId)) {
-            return res.json({ success: false, message: 'The reservation selection has expired. Please find the reservation again.', session_token: sessionToken });
+        if (expectedBookingId != null && String(expectedBookingId) !== String(existing.id)) {
+            return fail('The reservation selection has expired. Please find the reservation again.');
         }
 
-        // Determine target status
-        let targetStatus = 'confirmed';
         if (action === 'cancel') {
-            targetStatus = 'cancelled';
-        }
-        const alreadyConfirmed = currentStatus === 'confirmed' && targetStatus === 'confirmed';
-        const result = alreadyConfirmed
-            ? await query(`SELECT * FROM bookings WHERE id = $1 AND status IN ('pending', 'confirmed', 'modified')`, [bookingId])
-            : await query(
-                `UPDATE bookings SET status = $1, updated_at = NOW() WHERE id = $2 RETURNING *`,
-                [targetStatus, bookingId]
-            );
-
-        if (result.rows.length === 0) {
-            return res.json({ success: false, message: 'No booking found to update.', session_token: sessionToken });
-        }
-
-        const confirmedBooking = result.rows[0];
-
-        // 🧠 SYNC SESSION STATE (IMPORTANT)
-        let state = sessionState.get(session_id) || {};
-        state = { ...state, ...normalizeBooking(confirmedBooking) };
-        sessionState.set(session_id, state);
-
-        // Final Sync with Google Calendar on explicit confirmation
-        let calendarSync = { status: isCalendarSyncEnabled() ? 'failed' : 'disabled' };
-        try {
-            if (confirmedBooking.status === 'confirmed') {
-                if (calendarSync.status !== 'disabled') {
-                    const eventId = await upsertEvent(confirmedBooking);
-                    if (eventId) {
-                        await query('UPDATE bookings SET google_event_id = $1 WHERE id = $2', [eventId, confirmedBooking.id]);
-                        confirmedBooking.google_event_id = eventId;
-                        calendarSync = { status: 'synced' };
-                    }
-                }
-                // Notify customer
-                if (!alreadyConfirmed) await notifyBooking({
-                    type: 'confirm',
-                    toEmail: confirmedBooking.contact_email,
-                    toPhone: confirmedBooking.contact_phone,
-                    booking: confirmedBooking,
-                    isVip: false,
-                });
-            } else if (confirmedBooking.status === 'cancelled') {
-                if (confirmedBooking.google_event_id && calendarSync.status !== 'disabled') {
-                    const { cancelEvent } = await import('../services/googleCalendar.js');
-                    if (await cancelEvent(confirmedBooking.google_event_id)) {
-                        await query('UPDATE bookings SET google_event_id = NULL WHERE id = $1', [confirmedBooking.id]);
-                        confirmedBooking.google_event_id = null;
-                        calendarSync = { status: 'synced' };
-                    }
-                } else if (!confirmedBooking.google_event_id && calendarSync.status !== 'disabled') {
-                    calendarSync = { status: 'synced' };
-                }
-                await notifyBooking({
-                    type: 'cancel',
-                    toEmail: confirmedBooking.contact_email,
-                    toPhone: confirmedBooking.contact_phone,
-                    booking: confirmedBooking,
-                    isVip: false,
-                });
-                // try to promote waitlist for this date/service
-                try {
-                    const { promoteWaitlist } = await import('./bookings.js');
-                    await promoteWaitlist({ service_type: confirmedBooking.service_type, date: confirmedBooking.date });
-                } catch (e) {
-                    // ignore
-                }
+            let outcome;
+            try {
+                outcome = await booking.cancelReservation(business, existing.id, { reason: 'Cancelled by guest in chat' }, GUEST_ACTOR);
+            } catch (err) {
+                if (!isBookingFailure(err)) throw err;
+                return fail(bookingFailureMessage(err, 'Your reservation has not been cancelled.'), { code: err.code });
             }
-        } catch (syncErr) {
-            console.error('[POST /api/chat/confirm] Calendar Sync Error:', syncErr);
-            // We still consider the booking confirmed in our DB even if calendar fails
+            sessionState.delete(session_id);
+            return res.json({ success: true, booking_id: existing.id, status: 'cancelled', calendar_sync: outcome.calendar_sync,
+                message: `Your reservation has been cancelled.${syncSentence(outcome.calendar_sync)}`, session_token: sessionToken });
         }
 
-        state = confirmedBooking.status === 'cancelled' ? {}
-            : { ...state, ...normalizeBooking(confirmedBooking), calendar_sync: calendarSync };
+        let outcome;
+        if (existing.status === 'pending' && !existing.waitlisted) {
+            // A hold created before drafts stopped reserving inventory.
+            outcome = await booking.confirmHeldReservation(business, existing.id, GUEST_ACTOR);
+        } else {
+            // Already confirmed: nothing to change. Only retry the calendar entry.
+            outcome = { reservation: existing, calendar_sync: existing.status === 'awaiting_confirmation' || existing.waitlisted
+                ? { status: 'not_required' } : await syncCalendar(business, existing.id) };
+        }
+        state = { ...state, ...normalizeBooking(outcome.reservation), calendar_sync: outcome.calendar_sync };
         sessionState.set(session_id, state);
-
         return res.json({
-            success: true,
-            booking_id: confirmedBooking.id,
-            calendar_sync: calendarSync,
-            message: calendarSync.status === 'synced' ? 'Booking saved and Google Calendar updated.'
-                : calendarSync.status === 'disabled' ? 'Booking saved. Google Calendar sync is disabled.'
-                    : 'Booking saved, but Google Calendar could not be updated.',
-            session_token: sessionToken,
+            success: true, booking_id: outcome.reservation.id, status: outcome.reservation.display_status,
+            confirmed: ['confirmed', 'modified'].includes(outcome.reservation.status),
+            calendar_sync: outcome.calendar_sync, message: confirmationMessage(outcome.reservation, outcome.calendar_sync),
+            data: state, session_token: sessionToken,
         });
     } catch (err) {
         console.error('[POST /api/chat/confirm] Error:', err);
         return res.status(500).json({ error: 'Something went wrong.' });
     }
-});
+}
 
 export default router;
-async function findNextAvailableSlot({ service_type, date, start_time, daysToScan = 7 }) {
-    const base = parseDate(date);
-    if (!base) return null;
-    for (let i = 1; i <= daysToScan; i++) {
-        const d = new Date(`${base}T00:00:00`);
-        d.setDate(d.getDate() + i);
-        const candidate = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-        try {
-            const res = await checkAvailability({ service_type, date: candidate, start_time, end_time: null });
-            if (!res.waitlist && res.available > 0) {
-                return { date: candidate, available: res.available, total: res.total };
-            }
-        } catch (e) {
-            // continue
-        }
-    }
-    return null;
-}

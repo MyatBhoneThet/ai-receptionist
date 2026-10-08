@@ -1,4 +1,11 @@
 -- ============================================================
+-- HISTORICAL — DO NOT RUN AGAINST REAL DATA.
+-- This is the pre-platform, single-business schema. It DROPS every table.
+-- It is kept only so tests can rebuild an old database and prove that
+-- backend/migrations/ upgrades it without losing anything.
+-- To create or upgrade a database, run:  cd backend && npm run db:migrate
+-- ============================================================
+-- ============================================================
 -- AI Receptionist — PostgreSQL Schema (Clean Redesign)
 -- Run this to wipe and recreate all tables from scratch.
 -- ============================================================

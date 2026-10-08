@@ -7,12 +7,12 @@ import { globalLimiter } from './middleware/rateLimiter.js';
 
 import chatRouter from './routes/chat.js';
 import bookingsRouter from './routes/bookings.js';
-import analyticsRouter from './routes/analytics.js';
 import usersRouter from './routes/users.js';
 import availabilityRouter from './routes/availability.js';
-import inventoryRouter from './routes/inventory.js';
-import settingsRouter from './routes/settings.js';
-import { autoSeedInventory } from './services/autoSeedInventory.js';
+import businessRouter, { accountRouter } from './routes/businesses.js';
+import webhooksRouter from './routes/webhooks.js';
+import { startJobWorker } from './booking/sync/jobs.js';
+import { scheduleReconciliation } from './booking/sync/schedule.js';
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -46,7 +46,8 @@ app.use(
       'Authorization',
       'X-Session-Id',
       'X-Session-Token',
-      'X-Admin-Token',
+      'X-Business',
+      'Idempotency-Key',
     ],
     credentials: true,
   })
@@ -56,17 +57,22 @@ app.use(cookieParser());
 // Global rate limiter (100 req / 15 min per IP) — applied before all routes
 app.use(globalLimiter);
 
+// Provider webhooks are authenticated against the exact bytes received, so
+// they are mounted before JSON parsing.
+app.use('/api/webhooks', express.raw({ type: '*/*', limit: '1mb' }), webhooksRouter);
+
 // Body size guard
 app.use(express.json({ limit: '1mb' }));
 
 // Routes
 app.use('/api/chat', chatRouter);
 app.use('/api/bookings', bookingsRouter);
-app.use('/api/analytics', analyticsRouter);
 app.use('/api/users', usersRouter);
 app.use('/api/availability', availabilityRouter);
-app.use('/api/inventory', inventoryRouter);
-app.use('/api/settings', settingsRouter);
+// Staff API. Every /api/b/:businessId route checks the signed-in user's
+// membership of that business on the server.
+app.use('/api/businesses', accountRouter);
+app.use('/api/b/:businessId', businessRouter);
 
 // Health check
 app.get('/health', (req, res) => {
@@ -114,9 +120,8 @@ if (process.env.NODE_ENV !== 'test') {
     const server = app.listen(PORT, listenHost, () => {
       console.log(`✅ AI Receptionist backend running on ${formatListenUrl(listenHost, PORT)}`);
       console.log(`   FRONTEND_URL=${ALLOWED_ORIGIN}`);
-      if (process.env.AUTO_SEED_INVENTORY === 'true' && process.env.NODE_ENV !== 'production') {
-        autoSeedInventory().catch((err) => console.error('[autoSeedInventory]', err));
-      }
+      // Durable jobs: Calendar retries, provider reconciliation, unknown-outcome checks.
+      if (process.env.DISABLE_JOB_WORKER !== 'true') startJobWorker({ onTick: scheduleReconciliation });
     });
 
     server.on('error', (err) => {

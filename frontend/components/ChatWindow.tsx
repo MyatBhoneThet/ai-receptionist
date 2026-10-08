@@ -30,7 +30,7 @@ export default function ChatWindow({ messages }: ChatWindowProps) {
                             Welcome back
                         </h3>
                         <p className="text-sm text-ink/40 font-medium tracking-tight">
-                            how can I assist you at Lumière today?
+                            how can I assist you today?
                         </p>
                     </div>
                     <div className="flex flex-wrap justify-center gap-3 max-w-sm">

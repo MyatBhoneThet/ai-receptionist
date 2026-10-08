@@ -8,7 +8,7 @@ import TextInput from '../components/TextInput';
 import BookingSummary from '../components/BookingSummary';
 import ConfirmModal from '../components/ConfirmModal';
 import ThinkingOrb from '../components/ThinkingOrb';
-import { sendMessage, resetConversation, ChatResponse, BookingData, ConfirmBookingResponse } from '../lib/api';
+import { sendMessage, resetConversation, getPublicBusiness, setGuestBusiness, ChatResponse, BookingData, ConfirmBookingResponse, PublicBusiness } from '../lib/api';
 
 /**
  * Speak a string using Web Speech Synthesis
@@ -42,21 +42,47 @@ interface Message {
     content: string;
 }
 
+const SERVICE_PROMPTS = [
+    { service: 'hotel', label: 'Hotel Rooms', prompt: "I'd like to book a hotel room" },
+    { service: 'restaurant', label: 'Restaurant', prompt: "I'd like to book a table at the restaurant" },
+    { service: 'meeting', label: 'Meetings', prompt: "I'd like to book a meeting room" },
+] as const;
+
 export default function Page() {
     const [sessionId, setSessionId] = useState<string>('');
     const [sessionToken, setSessionToken] = useState<string>('');
+    const [venue, setVenue] = useState<PublicBusiness | null>(null);
+    const [venueError, setVenueError] = useState<string>('');
+    // Session and token are stored per business: a token is only valid for the
+    // business that issued it.
+    const storageKeys = useRef({ session: 'ai_receptionist_session', token: 'ai_receptionist_session_token' });
+    const rememberToken = useCallback((token: string) => {
+        setSessionToken(token);
+        localStorage.setItem(storageKeys.current.token, token);
+    }, []);
 
     useEffect(() => {
-        const stored = localStorage.getItem('ai_receptionist_session');
-        const storedToken = localStorage.getItem('ai_receptionist_session_token');
-        if (stored) {
-            setSessionId(stored);
-            if (storedToken) setSessionToken(storedToken);
-        } else {
-            const newId = uuidv4();
-            localStorage.setItem('ai_receptionist_session', newId);
-            setSessionId(newId);
-        }
+        const slug = new URLSearchParams(window.location.search).get('business') || process.env.NEXT_PUBLIC_DEFAULT_BUSINESS_SLUG || '';
+        setGuestBusiness(slug);
+        getPublicBusiness().then((business) => {
+            setVenue(business);
+            setGuestBusiness(business.slug);
+            storageKeys.current = { session: `ai_receptionist_session:${business.slug}`, token: `ai_receptionist_session_token:${business.slug}` };
+            const stored = localStorage.getItem(storageKeys.current.session);
+            const storedToken = localStorage.getItem(storageKeys.current.token);
+            if (stored) {
+                setSessionId(stored);
+                if (storedToken) setSessionToken(storedToken);
+            } else {
+                const newId = uuidv4();
+                localStorage.setItem(storageKeys.current.session, newId);
+                setSessionId(newId);
+            }
+        }).catch(() => {
+            setVenueError(slug
+                ? 'This booking link is not recognised. Please use the link provided by the venue.'
+                : 'Please open the booking link provided by the venue.');
+        });
     }, []);
 
     const [messages, setMessages] = useState<Message[]>([]);
@@ -93,10 +119,7 @@ export default function Page() {
 
         try {
             const response: ChatResponse = await sendMessage(sessionId, text);
-            if (response.session_token) {
-                setSessionToken(response.session_token);
-                localStorage.setItem('ai_receptionist_session_token', response.session_token);
-            }
+            if (response.session_token) rememberToken(response.session_token);
             setMessages((prev) => [...prev, { role: 'assistant', content: response.message }]);
             // attach availability to data for UI
             const mergedData = response.data ? { ...response.data, availability: response.availability } : response.data;
@@ -111,13 +134,9 @@ export default function Page() {
                 speakText(response.speak);
             }
 
-            const bookable = ['book_restaurant', 'book_hotel', 'book_meeting'];
-            if (bookable.includes(response.intent) && (!response.missing_fields || response.missing_fields.length === 0)) {
-                confirmTimer.current = setTimeout(() => setShowConfirm(true), 800);
-            }
-
-            // @ts-ignore
-            if (response.show_cancel_confirm) {
+            // The confirmation step opens only when the backend has checked the
+            // request and has real terms (or a waitlist offer) to confirm.
+            if (response.requires_confirmation || response.show_cancel_confirm) {
                 confirmTimer.current = setTimeout(() => setShowConfirm(true), 800);
             }
         } catch (err) {
@@ -127,8 +146,7 @@ export default function Page() {
                 ? err.response.data : null;
             if (errorData && typeof errorData === 'object' && 'session_token' in errorData
                 && typeof errorData.session_token === 'string' && errorData.session_token) {
-                setSessionToken(errorData.session_token);
-                localStorage.setItem('ai_receptionist_session_token', errorData.session_token);
+                rememberToken(errorData.session_token);
             }
             const errorMsg = "Sorry, something went wrong. Please try again.";
             setMessages((prev) => [...prev, { role: 'assistant', content: errorMsg }]);
@@ -136,7 +154,7 @@ export default function Page() {
         } finally {
             setLoading(false);
         }
-    }, [loading, resetting, sessionId]);
+    }, [loading, resetting, sessionId, rememberToken]);
 
     const handleClearConversation = async () => {
         if (loading || resetting || !sessionId) return;
@@ -182,17 +200,32 @@ export default function Page() {
         const isCancel = currentIntent === 'cancel_booking' || currentIntent === 'cancel';
         setShowConfirm(false);
         const confirmMsg = response.message || (isCancel
-            ? '🗑️ Your booking has been cancelled. Is there anything else I can help with?'
-            : 'Your booking is confirmed! Have a nice day!');
-        if (response.session_token) {
-            setSessionToken(response.session_token);
-            localStorage.setItem('ai_receptionist_session_token', response.session_token);
-        }
+            ? 'Your booking has been cancelled. Is there anything else I can help with?'
+            : 'Your booking has been saved.');
+        if (response.session_token) rememberToken(response.session_token);
         setMessages((prev) => [...prev, { role: 'assistant', content: confirmMsg }]);
         speakText(confirmMsg);
-        setCurrentData(null);
-        setCurrentIntent('');
+        // Show the saved reservation with its real status (confirmed, waitlisted
+        // or awaiting confirmation) rather than assuming it was confirmed.
+        if (!isCancel && response.data?.id) {
+            setCurrentData(response.data);
+            setCurrentIntent('reservation_slip');
+        } else {
+            setCurrentData(null);
+            setCurrentIntent('');
+        }
         setMissingFields([]);
+    };
+
+    // Nothing was booked: explain why in the conversation, and ask again if the
+    // terms changed.
+    const handleConfirmFailed = (response: ConfirmBookingResponse) => {
+        setShowConfirm(false);
+        if (response.session_token) rememberToken(response.session_token);
+        setMessages((prev) => [...prev, { role: 'assistant', content: response.message }]);
+        speakText(response.message);
+        if (response.data) setCurrentData(response.data);
+        if (response.requires_confirmation) confirmTimer.current = setTimeout(() => setShowConfirm(true), 1200);
     };
 
     const handleCancelConfirm = () => {
@@ -211,11 +244,11 @@ export default function Page() {
                         <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-white shadow-sm border border-parchment">
                             <span className="text-3xl">🏨</span>
                         </div>
-                        <h1 className="text-2xl font-bold tracking-tight text-ink serif lowercase">
-                            Lumière <span className="text-xs absolute -mt-1 ml-1 opacity-50 not-italic">AI</span>
+                        <h1 className="text-2xl font-bold tracking-tight text-ink serif">
+                            {venue?.name || 'Reception'}
                         </h1>
                         <p className="mt-1 text-[10px] font-bold tracking-widest text-gold uppercase">
-                            Grand Concierge
+                            AI Concierge
                         </p>
                     </div>
 
@@ -223,27 +256,19 @@ export default function Page() {
                         <section>
                             <h3 className="text-[10px] font-bold uppercase tracking-widest text-ink/40 mb-3 ml-2">Services</h3>
                             <div className="space-y-1">
-                                <div 
-                                    className="flex items-center space-x-3 rounded-lg px-3 py-2 text-sm font-medium text-ink transition hover:bg-white leading-none group cursor-pointer"
-                                    onClick={() => handleTextSend("I'd like to book a hotel room")}
-                                >
-                                    <span className="opacity-50 group-hover:opacity-100 serif">01.</span>
-                                    <span>Hotel Rooms</span>
-                                </div>
-                                <div 
-                                    className="flex items-center space-x-3 rounded-lg px-3 py-2 text-sm font-medium text-ink transition hover:bg-white leading-none group cursor-pointer"
-                                    onClick={() => handleTextSend("I'd like to book a table at the restaurant")}
-                                >
-                                    <span className="opacity-50 group-hover:opacity-100 serif">02.</span>
-                                    <span>Restaurant</span>
-                                </div>
-                                <div 
-                                    className="flex items-center space-x-3 rounded-lg px-3 py-2 text-sm font-medium text-ink transition hover:bg-white leading-none group cursor-pointer"
-                                    onClick={() => handleTextSend("I'd like to book a meeting room")}
-                                >
-                                    <span className="opacity-50 group-hover:opacity-100 serif">03.</span>
-                                    <span>Meetings</span>
-                                </div>
+                                {SERVICE_PROMPTS.filter((item) => venue?.services.includes(item.service)).map((item, index) => (
+                                    <div
+                                        key={item.service}
+                                        className="flex items-center space-x-3 rounded-lg px-3 py-2 text-sm font-medium text-ink transition hover:bg-white leading-none group cursor-pointer"
+                                        onClick={() => handleTextSend(item.prompt)}
+                                    >
+                                        <span className="opacity-50 group-hover:opacity-100 serif">{String(index + 1).padStart(2, '0')}.</span>
+                                        <span>{item.label}</span>
+                                    </div>
+                                ))}
+                                {venue && venue.services.length === 0 && (
+                                    <p className="px-3 text-xs text-ink/50">Online booking is not open yet. Please contact the venue directly.</p>
+                                )}
                             </div>
                         </section>
                     </nav>
@@ -272,12 +297,16 @@ export default function Page() {
                         </div>
 
                         <div className="flex items-center space-x-2 lg:hidden">
-                             <span className="text-lg serif font-bold">Lumière</span>
+                             <span className="text-lg serif font-bold">{venue?.name || ''}</span>
                         </div>
                     </header>
 
                     <div className="flex-1 overflow-hidden relative">
-                        <ChatWindow messages={messages} />
+                        {venueError ? (
+                            <div className="flex h-full items-center justify-center p-8 text-center" role="alert">
+                                <p className="max-w-sm text-sm text-ink/70">{venueError}</p>
+                            </div>
+                        ) : <ChatWindow messages={messages} />}
                     </div>
 
                     <footer className="shrink-0 p-4 sm:p-6 lg:p-8 bg-gradient-to-t from-white/80 to-transparent">
@@ -315,11 +344,11 @@ export default function Page() {
                                         if (next) setSpeechError('');
                                     }}
                                     onError={setSpeechError}
-                                    disabled={loading || resetting || showConfirm}
+                                    disabled={loading || resetting || showConfirm || !sessionId}
                                     lang={speechLang}
                                 />
                                 <div className="min-w-0 flex-1">
-                                    <TextInput onSend={handleTextSend} disabled={loading || resetting || showConfirm} value={inputValue} onChangeValue={setInputValue} focusRequest={inputFocusRequest} />
+                                    <TextInput onSend={handleTextSend} disabled={loading || resetting || showConfirm || !sessionId} value={inputValue} onChangeValue={setInputValue} focusRequest={inputFocusRequest} />
                                 </div>
                             </div>
                             {speechError && <p className="mt-3 text-xs text-ink/70" role="alert">{speechError}</p>}
@@ -364,6 +393,7 @@ export default function Page() {
                     summary={currentData}
                     intent={currentIntent}
                     onConfirm={handleConfirmed}
+                    onFailed={handleConfirmFailed}
                         onCancel={handleCancelConfirm}
                     />
                 )}

@@ -1,4 +1,3 @@
-import { checkAvailability, serviceFkColumn } from './availability.js';
 import { bookingDateKey, displayBookingDate } from './bookingDates.js';
 import { formatDisplayDateValue } from './dateOnly.js';
 
@@ -31,15 +30,17 @@ function timeText(minutes) {
   return remainder % 60 ? `${result}:${String(remainder % 60).padStart(2, '0')}` : result;
 }
 
-function invalid(message, availability) {
-  return { valid: false, message, ...(availability ? { availability } : {}) };
+function invalid(message) {
+  return { valid: false, message };
 }
 
-/** Validate a proposed amendment without writing to the database or Calendar.
- * `assignments` contains the safe values to persist, including any preserved
- * duration or allocation needed to keep the booking consistent.
+/** Check the SHAPE of a guest's requested amendment (valid dates, times, guest
+ * count, phone) and produce friendly prompts. It decides nothing about
+ * availability, capacity or price: those are enforced by the shared booking
+ * layer when the change is applied, in the same transaction as the write.
+ * `assignments` holds the normalized values, including a preserved duration.
  */
-export async function validateBookingAlteration(currentBooking, changes) {
+export function normalizeBookingAlteration(currentBooking, changes) {
   if (!currentBooking || !changes || Object.keys(changes).length === 0) {
     return invalid('What would you like to change in your reservation?');
   }
@@ -120,50 +121,9 @@ export async function validateBookingAlteration(currentBooking, changes) {
         assignments.end_time = timeText(endTime);
       }
     }
-    if (endTime <= startTime) {
+    if (('start_time' in assignments || 'end_time' in assignments) && endTime <= startTime) {
       return invalid('The end time must be after the start time. What time would you like instead?');
     }
   }
-
-  const fkColumn = serviceFkColumn(amended.service_type);
-  const currentResourceId = Number(currentBooking[fkColumn]) || null;
-  let availability;
-  try {
-    availability = await checkAvailability({
-      service_type: amended.service_type,
-      date: startDate,
-      end_date: endDate,
-      start_time: startTime === null ? amended.start_time : timeText(startTime),
-      end_time: endTime === null ? amended.end_time : timeText(endTime),
-      people,
-      ...(currentResourceId ? {} : { preferred_inventory: currentBooking.preferred_inventory }),
-      exclude_booking_id: currentBooking.id || currentBooking.edit_booking_id,
-    });
-  } catch (error) {
-    console.error('[booking alteration availability]', error.message);
-    return invalid('I could not check availability just now. Your reservation has not been changed. Please try again.');
-  }
-
-  const currentOption = availability.options?.find((option) => Number(option.id) === currentResourceId);
-  const currentIsAvailable = Boolean(currentOption?.available)
-    && Number(currentOption.capacity) >= people;
-  // A waitlist amendment does not claim an allocated resource or silently
-  // promote the reservation to a confirmed booking.
-  if (currentBooking.waitlisted === true) {
-    assignments.waitlisted = true;
-    if (currentResourceId && !currentIsAvailable) assignments[fkColumn] = null;
-    return { valid: true, assignments, availability };
-  }
-  if (currentResourceId && !currentIsAvailable) {
-    return invalid(`Your current ${RESOURCE_NAMES[amended.service_type]} is unavailable for those details. Please choose a different date, time, or guest count.`, availability);
-  }
-  if (!currentResourceId) {
-    const selected = availability.selected_option;
-    if (!selected?.available || Number(selected.capacity) < people || !Number.isInteger(Number(selected.id)) || Number(selected.id) < 1) {
-      return invalid('There is no availability for those details. Please choose a different date, time, or guest count.', availability);
-    }
-    assignments[fkColumn] = Number(selected.id);
-    assignments.waitlisted = false;
-  }
-  return { valid: true, assignments, availability };
+  return { valid: true, assignments };
 }

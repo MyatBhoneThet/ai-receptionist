@@ -6,6 +6,38 @@
       "runtimeExecutable": "npm",
       "runtimeArgs": ["--prefix", "frontend", "run", "dev"],
       "port": 3000
+    },
+    {
+      "name": "demo-backend",
+      "runtimeExecutable": "env",
+      "runtimeArgs": [
+        "DATABASE_URL=postgres://localhost:5432/ai_receptionist_dev",
+        "PORT=4100",
+        "FRONTEND_URL=http://localhost:3100",
+        "ALLOW_MOCK_PROVIDER_BOOKING=true",
+        "INTEGRATION_ENCRYPTION_KEY=local-demo-only-not-a-secret-0000000000",
+        "npm",
+        "--prefix",
+        "backend",
+        "start"
+      ],
+      "port": 4100
+    },
+    {
+      "name": "demo-frontend",
+      "runtimeExecutable": "env",
+      "runtimeArgs": [
+        "NEXT_PUBLIC_API_URL=http://localhost:4100",
+        "npm",
+        "--prefix",
+        "frontend",
+        "run",
+        "dev",
+        "--",
+        "-p",
+        "3100"
+      ],
+      "port": 3100
     }
   ]
 }

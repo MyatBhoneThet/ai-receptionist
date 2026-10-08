@@ -1,70 +1,78 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { getAllBookings, fetchMe } from '../../lib/api';
+import React, { useMemo, useState } from 'react';
+import DashboardShell, { useAsync, useDashboard } from '../../components/dashboard/DashboardShell';
+import ReservationDetail, { statusTone } from '../../components/dashboard/ReservationDetail';
+import { Badge, Button, Card, Empty, ErrorNotice, Loading } from '../../components/dashboard/ui';
+import { Reservation } from '../../lib/api';
+import { SERVICE_UNIT, STATUS_LABEL, clock, todayIn } from '../../lib/format';
 
-export default function CalendarPage() {
-  const [bookings, setBookings] = useState<any[]>([]);
-  const [error, setError] = useState('');
-  const [userEmail, setUserEmail] = useState('');
-
-  useEffect(() => {
-    (async () => {
-      try {
-        const stored = typeof window !== 'undefined' ? localStorage.getItem('ai_receptionist_auth_token') || undefined : undefined;
-        if (stored) {
-          const me = await fetchMe(stored);
-          setUserEmail(me.email);
-        }
-        const b = await getAllBookings(stored, { limit: 200 });
-        setBookings(b);
-      } catch (err: any) {
-        setError(err?.response?.data?.error || 'Failed to load bookings');
-      }
-    })();
-  }, []);
-
-  const grouped = groupByDate(bookings);
-
-  return (
-    <main className="min-h-screen bg-gradient-to-b from-white to-parchment">
-      <header className="px-10 py-6 flex items-center justify-between border-b border-parchment">
-        <div>
-          <p className="text-xs uppercase font-bold tracking-widest text-ink/50">Calendar</p>
-          <h1 className="text-3xl font-bold text-ink">Bookings</h1>
-        </div>
-        <p className="text-xs text-ink/60">{userEmail}</p>
-      </header>
-
-      <section className="px-10 py-8 grid md:grid-cols-3 lg:grid-cols-4 gap-4">
-        {Object.entries(grouped).map(([date, items]) => (
-          <div key={date} className="rounded-2xl border border-parchment bg-white p-4 shadow-sm">
-            <p className="text-[11px] uppercase tracking-widest font-bold text-ink/50">{date}</p>
-            <p className="text-2xl font-bold text-ink mt-1">{items.length}</p>
-            <div className="mt-3 space-y-2 max-h-64 overflow-auto">
-              {items.map((b) => (
-                <div key={b.id} className="rounded-xl border border-parchment px-3 py-2">
-                  <p className="text-sm font-bold text-ink">{b.reservation_name || 'Guest'}</p>
-                  <p className="text-xs text-ink/60">{b.service_type} · {b.start_time ? b.start_time.slice(0,5) : '—'} · {b.status}</p>
-                </div>
-              ))}
-            </div>
-          </div>
-        ))}
-        {Object.keys(grouped).length === 0 && <p className="text-sm text-ink/60">No bookings yet.</p>}
-      </section>
-
-      {error && <p className="text-sm text-red-600 px-10 pb-6">{error}</p>}
-    </main>
-  );
+function addDays(dateKey: string, days: number) {
+    const date = new Date(`${dateKey}T00:00:00Z`);
+    date.setUTCDate(date.getUTCDate() + days);
+    return date.toISOString().slice(0, 10);
 }
 
-function groupByDate(bookings: any[]) {
-  return bookings.reduce((acc: Record<string, any[]>, b) => {
-    const key = (b.date || '').slice(0, 10);
-    if (!key) return acc;
-    if (!acc[key]) acc[key] = [];
-    acc[key].push(b);
-    return acc;
-  }, {});
+export default function CalendarPage() {
+    return (
+        <DashboardShell eyebrow="Calendar" title="Reservations by day">
+            <Calendar />
+        </DashboardShell>
+    );
+}
+
+function Calendar() {
+    const { api, business } = useDashboard();
+    const today = todayIn(business.timezone);
+    const [start, setStart] = useState(today);
+    const days = useMemo(() => Array.from({ length: 14 }, (_, index) => addDays(start, index)), [start]);
+    const [selected, setSelected] = useState<Reservation | null>(null);
+    // A day either side so stays that began earlier are still included.
+    const list = useAsync(() => api.reservations({ from: new Date(`${addDays(start, -1)}T00:00:00Z`).toISOString(), to: new Date(`${addDays(start, 16)}T00:00:00Z`).toISOString(), order: 'schedule', limit: 500 }), [start, business.id]);
+
+    const onDay = (day: string) => (list.data || []).filter((row) => {
+        if (!row.date || ['cancelled', 'no_show'].includes(row.status)) return false;
+        return row.service_type === 'hotel' ? row.date <= day && (row.end_date || row.date) > day : row.date === day;
+    });
+
+    return (
+        <>
+            <div className="flex flex-wrap items-center gap-2">
+                <Button tone="ghost" onClick={() => setStart(addDays(start, -14))}>← Earlier</Button>
+                <Button tone="ghost" onClick={() => setStart(today)}>Today</Button>
+                <Button tone="ghost" onClick={() => setStart(addDays(start, 14))}>Later →</Button>
+                <span className="text-xs text-ink/50">Dates in {business.timezone}. Hotel stays appear on each night.</span>
+            </div>
+            <ErrorNotice error={list.error} />
+            {list.loading && !list.data ? <Loading /> : (
+                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                    {days.map((day) => {
+                        const rows = onDay(day);
+                        return (
+                            <Card key={day} className="!p-4">
+                                <div className="flex items-baseline justify-between">
+                                    <p className={`text-[11px] font-bold uppercase tracking-widest ${day === today ? 'text-gold' : 'text-ink/50'}`}>
+                                        {new Intl.DateTimeFormat(undefined, { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' }).format(new Date(`${day}T00:00:00Z`))}{day === today ? ' · today' : ''}
+                                    </p>
+                                    <p className="text-xl font-bold text-ink">{rows.length}</p>
+                                </div>
+                                <div className="mt-3 max-h-64 space-y-2 overflow-auto">
+                                    {rows.map((row) => (
+                                        <button key={row.id} onClick={() => setSelected(row)} className="block w-full rounded-xl border border-parchment px-3 py-2 text-left hover:bg-parchment/50">
+                                            <p className="text-sm font-bold text-ink">{row.reservation_name || 'Guest'}</p>
+                                            <p className="text-xs text-ink/60">{SERVICE_UNIT[row.service_type]} {row.resource?.code || row.resource_type?.name || ''} · {row.service_type === 'hotel' ? `until ${row.end_date}` : clock(row.start_time)}</p>
+                                            <Badge tone={statusTone(row.display_status)}>{STATUS_LABEL[row.display_status] || row.display_status}</Badge>
+                                        </button>
+                                    ))}
+                                    {rows.length === 0 && <p className="text-xs text-ink/40">Nothing booked.</p>}
+                                </div>
+                            </Card>
+                        );
+                    })}
+                </div>
+            )}
+            {!list.loading && (list.data || []).length === 0 && <Empty title="No reservations in this period" />}
+            {selected && <ReservationDetail reservation={selected} onClose={() => setSelected(null)} onChanged={() => list.reload()} />}
+        </>
+    );
 }
