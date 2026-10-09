@@ -9,6 +9,7 @@ import BookingSummary from '../components/BookingSummary';
 import ConfirmModal from '../components/ConfirmModal';
 import ThinkingOrb from '../components/ThinkingOrb';
 import { sendMessage, resetConversation, ChatResponse, BookingData, ConfirmBookingResponse } from '../lib/api';
+import { appendVoiceTranscript } from '../lib/voiceDraft';
 
 /**
  * Speak a string using Web Speech Synthesis
@@ -72,6 +73,7 @@ export default function Page() {
     const [isListening, setIsListening] = useState<boolean>(false);
     const [speechError, setSpeechError] = useState<string>('');
     const [inputValue, setInputValue] = useState<string>('');
+    const [inputFocusRequest, setInputFocusRequest] = useState(0);
     const [speechLang, setSpeechLang] = useState<string>('en-US');
     const confirmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -168,7 +170,8 @@ export default function Page() {
 
     const handleVoiceTranscript = useCallback((text: string) => {
         setInterimTranscript('');
-        setInputValue(text);
+        setInputValue((draft) => appendVoiceTranscript(draft, text));
+        setInputFocusRequest((request) => request + 1);
     }, []);
 
     const handleTextSend = useCallback((text: string) => {
@@ -288,34 +291,44 @@ export default function Page() {
                                     </span>
                                 </div>
                             )}
-                            <div className="flex items-center space-x-4">
+                            <div className="mb-3 ml-[72px] flex items-center gap-2">
+                                <label htmlFor="speech-language" className="text-[10px] font-bold uppercase tracking-widest text-ink/50">Voice lang</label>
+                                <select
+                                    id="speech-language"
+                                    className="rounded-full border border-parchment bg-white px-3 py-1 text-xs text-ink/70"
+                                    value={speechLang}
+                                    onChange={(event) => {
+                                        setSpeechLang(event.target.value);
+                                        setInputFocusRequest((request) => request + 1);
+                                    }}
+                                >
+                                    <option value="en-US">English (US)</option>
+                                    <option value="es-ES">Español</option>
+                                    <option value="fr-FR">Français</option>
+                                    <option value="th-TH">ไทย</option>
+                                </select>
+                            </div>
+                            <div className="flex items-center gap-4">
                                 <VoiceInput
                                     onTranscript={handleVoiceTranscript}
                                     onInterimTranscript={setInterimTranscript}
                                     onListeningChange={(next) => {
                                         setIsListening(next);
                                         if (next) setSpeechError('');
+                                        else setInputFocusRequest((request) => request + 1);
                                     }}
                                     onError={setSpeechError}
-                                    disabled={loading || resetting}
+                                    disabled={loading || resetting || showConfirm}
                                     lang={speechLang}
                                 />
-                                <div className="min-w-0 flex-1 space-y-3">
-                                    <div className="flex items-center gap-2">
-                                        <label htmlFor="speech-language" className="text-[10px] font-bold uppercase tracking-widest text-ink/50">Voice lang</label>
-                                        <select
-                                            id="speech-language"
-                                            className="rounded-full border border-parchment bg-white px-3 py-1 text-xs text-ink/70"
-                                            value={speechLang}
-                                            onChange={(e) => setSpeechLang(e.target.value)}
-                                        >
-                                            <option value="en-US">English (US)</option>
-                                            <option value="es-ES">Español</option>
-                                            <option value="fr-FR">Français</option>
-                                            <option value="th-TH">ไทย</option>
-                                        </select>
-                                    </div>
-                                    <TextInput onSend={handleTextSend} disabled={loading || resetting} value={inputValue} onChangeValue={setInputValue} />
+                                <div className="min-w-0 flex-1">
+                                    <TextInput
+                                        onSend={handleTextSend}
+                                        disabled={loading || resetting || showConfirm}
+                                        value={inputValue}
+                                        onChangeValue={setInputValue}
+                                        focusRequest={inputFocusRequest}
+                                    />
                                 </div>
                             </div>
                             {speechError && <p className="mt-3 text-xs text-ink/70" role="alert">{speechError}</p>}

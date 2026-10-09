@@ -14,6 +14,13 @@ const loaded = new Module(filename, module);
 loaded._compile(compiled, filename);
 const { createSpeechSession } = loaded.exports;
 
+const draftFilename = path.resolve(__dirname, '../lib/voiceDraft.ts');
+const draftModule = new Module(draftFilename, module);
+draftModule._compile(ts.transpileModule(fs.readFileSync(draftFilename, 'utf8'), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+}).outputText, draftFilename);
+const { appendVoiceTranscript } = draftModule.exports;
+
 function setup(options = {}) {
     const calls = { listening: [], transcripts: [], interim: [], errors: [], ends: 0 };
     const recognition = {
@@ -34,6 +41,37 @@ function setup(options = {}) {
     });
     return { session, recognition, calls };
 }
+
+test('successive recordings preserve typed text and edits without duplicating speech', () => {
+    let draft = 'Please book a meeting';
+    const onTranscript = (text) => { draft = appendVoiceTranscript(draft, text); };
+    const first = setup({ onTranscript });
+    first.session.start();
+    assert.equal(draft, 'Please book a meeting');
+    const staleResult = first.recognition.onresult;
+    first.recognition.result(' for seven people ', true);
+    staleResult({ results: [{ isFinal: true, 0: { transcript: 'for seven people' } }] });
+    first.recognition.onend();
+    assert.equal(draft, 'Please book a meeting for seven people');
+
+    draft = draft.replace('seven', 'eight') + ', ';
+    const second = setup({ onTranscript });
+    second.session.start();
+    assert.equal(draft, 'Please book a meeting for eight people, ');
+    second.recognition.result('next Tuesday');
+    second.recognition.onend();
+    assert.equal(draft, 'Please book a meeting for eight people, next Tuesday');
+
+    const silent = setup({ onTranscript });
+    silent.session.start();
+    silent.recognition.onerror({ error: 'no-speech' });
+    assert.equal(draft, 'Please book a meeting for eight people, next Tuesday');
+});
+
+test('empty voice input leaves the editable draft unchanged', () => {
+    assert.equal(appendVoiceTranscript('Keep my text  ', '   '), 'Keep my text  ');
+    assert.equal(appendVoiceTranscript('', '  Hello  '), 'Hello');
+});
 
 test('a final utterance stops listening and is delivered exactly once', () => {
     const { session, recognition, calls } = setup();

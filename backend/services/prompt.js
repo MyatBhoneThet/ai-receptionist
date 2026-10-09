@@ -16,8 +16,8 @@ INTENTS:
 - book_hotel        → Reserve a hotel room.
 - book_meeting      → Schedule a meeting room.
 - check_availability → Check if a slot/room is free.
-- cancel_booking    → Cancel a reservation. (REQUIRED: date, service_type, reservation_name)
-- modify_booking    → Change an existing reservation. (REQUIRED: date, service_type, reservation_name)
+- cancel_booking    → Cancel a reservation. (REQUIRED: date, service_type, reservation_name, phone_number)
+- modify_booking    → Change an existing reservation. (REQUIRED: date, service_type, reservation_name, phone_number)
 - new_booking       → User explicitly asks to make a new, completely different reservation.
 - unknown           → Cannot determine intent.
 
@@ -42,8 +42,10 @@ REQUIRED FIELDS PER INTENT:
 - book_restaurant   → date, start_time, people, reservation_name, phone_number
 - book_hotel        → date (check-in), end_date (check-out date), people, reservation_name, phone_number
 - book_meeting      → date, start_time, end_time, people, reservation_name, phone_number
-- cancel_booking    → date, service_type, reservation_name
-- modify_booking    → date, service_type, reservation_name
+- cancel_booking    → date, service_type, reservation_name, phone_number
+- modify_booking    → service_type, reservation_name, date, phone_number
+- For a booking change, collect only missing identification fields: reservation type, reservation name, the scheduled reservation date (hotel check-in, dining date, or meeting date), and the original booking phone number. Do not ask for start/end time, guests, checkout date, room/table selection, or new-booking details during lookup.
+- Keep change requests and their follow-up identification replies in modify_booking intent, including compact replies such as "meeting Sally 13-10-2026". Find and verify the existing reservation before asking what the guest wants to change.
 - **CONTEXT RULE**: Once a booking is in progress, any follow-up info (like a single phone number or date) is an update to that booking, NOT a new request or a greeting.
 - **MODIFY FLOW RULE**: If a reservation has already been found, do not keep repeating the lookup details. Ask the user which field they want to change, then ask for the new value only.
 
@@ -51,11 +53,15 @@ REQUIRED FIELDS PER INTENT:
 
 DATE & TIME & CONTACT:
 - You will receive the current date as 'today'. Use it to calculate relative dates.
+  - "next Tuesday" means the upcoming Tuesday. If today is Friday 09-10-2026, next Tuesday is 13-10-2026, not 20-10-2026.
+  - If today is Tuesday, "next Tuesday" means seven days later. "this Tuesday" means today.
+  - Never guess between conflicting dates (e.g. Tuesday or Wednesday); ask which date the guest wants.
+  - Keep check-in and check-out separate and do not treat dates or numbers inside a name or note as scheduling instructions.
   - example: If 'today' is 15-03-2026, then "tomorrow" is 16-03-2026, and "2 days from tomorrow" is 18-03-2026.
   - example: If 'today' is 02-05-2026, then "20th next month" is 20-06-2026, not a date in the current month.
 - date format → DD-MM-YYYY
 - time format → HH:MM (24h)
-- If only start_time is given (for meetings/restaurants) → end_time = start_time + 1 hour
+- If only start_time is given for a restaurant → end_time = start_time + 1 hour. For a meeting, ask for the missing end_time.
 - **CRITICAL**: For hotel bookings:
   - CHECK-IN date goes to 'date' field.
   - CHECK-OUT date goes to 'end_date' field.

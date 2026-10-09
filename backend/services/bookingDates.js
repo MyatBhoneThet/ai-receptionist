@@ -75,10 +75,10 @@ export function hasBookingDateExpression(message) {
 
 // Parse calendar dates without JS's ambiguous string-date parser. Ignore negated
 // alternatives, so "day after tomorrow, not tomorrow" retains the requested day.
-export function extractNaturalBookingDate(message, today = calendarToday()) {
+export function resolveNaturalBookingDate(message, today = calendarToday()) {
   const text = String(message || '').toLowerCase().replace(/([a-z])-([a-z])/g, '$1 $2');
   const todayKey = bookingDateKey(today);
-  if (!todayKey) return '';
+  if (!todayKey) return { date: '', status: 'invalid' };
   const [year, month, currentDay] = todayKey.split('-').map(Number);
   const candidates = [];
   const addMatches = (pattern, resolve) => {
@@ -99,10 +99,18 @@ export function extractNaturalBookingDate(message, today = calendarToday()) {
     const offset = match[0] === 'day after tomorrow' ? 2 : match[0] === 'tomorrow' ? 1 : match[0] === 'today' ? 0 : Number(match[0].match(/\d+/)[0]);
     return addBookingDays(today, offset);
   });
+  addMatches(new RegExp(`\\b(?:(this|next)\\s+week\\s+(?:on\\s+)?(${WEEKDAYS.join('|')})|(${WEEKDAYS.join('|')})\\s+(this|next)\\s+week)\\b`, 'g'), (match) => {
+    const weekday = new Date(`${todayKey}T00:00:00Z`).getUTCDay();
+    const weekStart = -((weekday + 6) % 7); // Calendar weeks begin Monday.
+    const target = WEEKDAYS.indexOf(match[2] || match[3]);
+    return addBookingDays(today, weekStart + ((target + 6) % 7) + ((match[1] || match[4]) === 'next' ? 7 : 0));
+  });
   addMatches(new RegExp(`\\b(?:(this|next)\\s+)?(${WEEKDAYS.join('|')})\\b`, 'g'), (match) => {
     const weekday = new Date(`${todayKey}T00:00:00Z`).getUTCDay();
     let offset = (WEEKDAYS.indexOf(match[2]) - weekday + 7) % 7;
-    if (match[1] === 'next' || offset === 0) offset += 7;
+    // "Next Tuesday" means the next occurrence of Tuesday, not an
+    // additional week after it. "This Friday" on Friday means today.
+    if (offset === 0 && match[1] !== 'this') offset = 7;
     return addBookingDays(today, offset);
   });
   addMatches(/\b(this|next)\s+month\s+(?:on\s+)?(\d{1,2})(?:st|nd|rd|th)?\b|\b(\d{1,2})\s+(this|next)\s+month\b/g, (match) => {
@@ -126,6 +134,25 @@ export function extractNaturalBookingDate(message, today = calendarToday()) {
   const eligible = candidates.filter((candidate) => candidate.value !== null
     && !candidates.some((other) => other !== candidate && other.index <= candidate.index
       && other.index + other.length >= candidate.index + candidate.length && other.length > candidate.length));
-  eligible.sort((a, b) => b.index - a.index || b.length - a.length);
-  return eligible[0]?.value || '';
+  eligible.sort((a, b) => a.index - b.index || b.length - a.length);
+  if (!eligible.length) return { date: '', status: hasBookingDateExpression(text) ? 'unresolved' : 'absent' };
+  const last = eligible.at(-1);
+  const beforeLast = text.slice(0, last.index);
+  const corrected = eligible.length > 1 && (
+    /\b(?:actually|instead|rather|make it|sorry|i mean|change(?: it)? to|move(?: it)? to|reschedule(?: it)? to)[,:]?\s*(?:on\s+)?$/.test(beforeLast)
+    || (/\b(?:change|move|reschedule)\b/.test(text)
+      && /\bfrom\s*$/.test(text.slice(0, eligible[0].index)) && /\bto\s*$/.test(beforeLast))
+  );
+  if (!last.value || (eligible.some((candidate) => !candidate.value) && !corrected)) {
+    return { date: '', status: 'invalid' };
+  }
+  const distinct = new Set(eligible.map((candidate) => candidate.value));
+  // A weekday alongside a matching calendar date is redundant, not a
+  // conflict. Other multiple dates require clarification unless corrected.
+  if (distinct.size > 1 && !corrected) return { date: '', status: 'ambiguous' };
+  return { date: last.value, status: 'resolved' };
+}
+
+export function extractNaturalBookingDate(message, today = calendarToday()) {
+  return resolveNaturalBookingDate(message, today).date;
 }

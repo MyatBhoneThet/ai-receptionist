@@ -955,7 +955,7 @@ const runRoutes = process.env.NO_LISTEN !== 'true';
       .post('/api/chat')
       .send({
         session_id: 'sess-hotel-overflow',
-        message: 'Book a room for Alex next week',
+        message: 'Book a room from 13-07-2026 to 20-07-2026 for two guests under the name Alex, phone number 0800100200',
       });
 
     expect(res.status).toBe(200);
@@ -1028,7 +1028,7 @@ const runRoutes = process.env.NO_LISTEN !== 'true';
       .post('/api/chat')
       .send({
         session_id: 'sess-restaurant-overflow',
-        message: 'Book dinner for a family of 5 at 6pm',
+        message: 'Book dinner on 14-07-2026 for a family of 5 at 6pm under the name Family Lee, phone number 0800100300',
       });
 
     expect(res.status).toBe(200);
@@ -1088,7 +1088,7 @@ const runRoutes = process.env.NO_LISTEN !== 'true';
       .post('/api/chat')
       .send({
         session_id: 'sess-duplicate',
-        message: 'Book the same table again for Nora',
+        message: 'Book the same table again on 20-06-2026 at 7pm for four guests under the name Nora, phone number 0800123000',
       });
 
     expect(res.status).toBe(200);
@@ -1343,13 +1343,13 @@ const runRoutes = process.env.NO_LISTEN !== 'true';
 
     expect(lookupRes.status).toBe(200);
     expect(lookupRes.body.message).toContain('To find your booking');
-    expect(lookupRes.body.missing_fields).toEqual(['reservation name']);
+    expect(lookupRes.body.missing_fields).toEqual(['reservation name', 'date', 'phone number']);
 
     const fieldRes = await request(app)
       .post('/api/chat')
       .send({
         session_id: 'sess-modify',
-        message: 'it\'s on 15-05-2026 and name is Talia',
+        message: 'it\'s on 15-05-2026 and name is Talia phone number 0800999000',
       });
 
     expect(fieldRes.status).toBe(200);
@@ -1434,7 +1434,7 @@ const runRoutes = process.env.NO_LISTEN !== 'true';
     }
 
     async function startFailedLookup() {
-      const response = await send('I want to change my meeting reservation on 14-10-2026 under the name Stuart');
+      const response = await send('I want to change my meeting reservation on 14-10-2026 under the name Stuart phone number 0801111111');
       expect(response.body.message).toMatch(/phone/i);
       expect(response.body.data).toEqual(expect.objectContaining({
         date: '14-10-2026', service_type: 'meeting', reservation_name: 'Stuart',
@@ -1505,7 +1505,7 @@ const runRoutes = process.env.NO_LISTEN !== 'true';
     });
 
     it('fills a missing reservation type without starting a new booking or losing the date/name', async () => {
-      const incomplete = await send('I want to change my reservation on 14-10-2026 under the name Stewart');
+      const incomplete = await send('I want to change my reservation on 14-10-2026 under the name Stewart phone number 0801111111');
       expect(incomplete.body.missing_fields).toEqual(['type of reservation']);
       expect(incomplete.body.data.modify_step).toBe('awaiting_lookup');
       expectLookupDidNotMutateBookings();
@@ -1597,22 +1597,29 @@ const runRoutes = process.env.NO_LISTEN !== 'true';
         const response = await send(`I would like to ${verb} a booking`);
         expect(response.body.intent).toBe('modify_booking');
         expect(response.body.data.modify_step).toBe('awaiting_lookup');
-        expect(response.body.missing_fields).toEqual(['type of reservation', 'reservation name']);
+        expect(response.body.missing_fields).toEqual(['type of reservation', 'reservation name', 'date', 'phone number']);
         expect(mockChat).not.toHaveBeenCalled();
         expectNoBookingChanges();
       }
     );
 
     it('uses the explicitly stated meeting type in the screenshot sentence, despite the word table', async () => {
+      state.bookings.find((booking) => booking.id === 80).date = '2026-10-07';
+      originalBookings = state.bookings.map(cloneRow);
       await send('I would like to alter a booking');
-      const response = await send('The date is next Wednesday and the table reservation is meeting and the name is Steward');
-      expectMeetingFound(response);
+      const response = await send('The date is next Wednesday and the table reservation is meeting and the name is Steward phone number 0801111111');
+      expect(response.body.data).toEqual(expect.objectContaining({
+        service_type: 'meeting', date: '07-10-2026', reservation_name: 'Steward',
+        edit_booking_id: 80, modify_step: 'choose_field',
+      }));
+      expect(mockChat).not.toHaveBeenCalled();
+      expectNoBookingChanges();
     });
 
     it.each(['meeting room', 'conference room', 'boardroom'])(
       'recognizes a %s reservation as a meeting rather than a hotel stay',
       async (service) => {
-        const response = await send(`Find my ${service} reservation on 14-10-2026 under the name Steward`);
+        const response = await send(`Find my ${service} reservation on 14-10-2026 under the name Steward phone number 0801111111`);
         expectMeetingFound(response);
       }
     );
@@ -1623,7 +1630,7 @@ const runRoutes = process.env.NO_LISTEN !== 'true';
       'meeting, not a restaurant',
       'not restaurant, meeting',
     ])('corrects only the type with "%s" while keeping the date and name', async (correction) => {
-      const failed = await send('I want to change my restaurant reservation on 14-10-2026 under the name Steward');
+      const failed = await send('I want to change my restaurant reservation on 14-10-2026 under the name Steward phone number 0801111111');
       expect(failed.body.data).toEqual(expect.objectContaining({
         service_type: 'restaurant', date: '14-10-2026', reservation_name: 'Steward',
         modify_step: 'awaiting_verification',
@@ -1637,7 +1644,7 @@ const runRoutes = process.env.NO_LISTEN !== 'true';
       const restaurant = { ...state.bookings.find((booking) => booking.id === 80), id: 81, service_type: 'restaurant' };
       state.bookings.push(restaurant);
       originalBookings = state.bookings.map(cloneRow);
-      const response = await send('I want to amend my booking on 14-10-2026 and the reservation type is restaurant for a meeting with colleagues and the name is Steward');
+      const response = await send('I want to amend my booking on 14-10-2026 and the reservation type is restaurant for a meeting with colleagues and the name is Steward phone number 0801111111');
       expect(response.body.data).toEqual(expect.objectContaining({
         service_type: 'restaurant', date: '14-10-2026', reservation_name: 'Steward',
         edit_booking_id: 81, modify_step: 'choose_field',
@@ -1647,7 +1654,7 @@ const runRoutes = process.env.NO_LISTEN !== 'true';
     });
 
     it('asks for clarification when unlabelled reservation types conflict instead of choosing one', async () => {
-      const response = await send('I want to alter my hotel or restaurant reservation on 14-10-2026 under the name Steward');
+      const response = await send('I want to alter my hotel or restaurant reservation on 14-10-2026 under the name Steward phone number 0801111111');
       expect(response.body.intent).toBe('modify_booking');
       expect(response.body.missing_fields).toEqual(['type of reservation']);
       expect(response.body.data).toEqual(expect.objectContaining({
@@ -1660,7 +1667,7 @@ const runRoutes = process.env.NO_LISTEN !== 'true';
     });
 
     it('does not silently retain the previous type when a follow-up introduces conflicting types', async () => {
-      await send('I want to change my restaurant reservation on 14-10-2026 under the name Steward');
+      await send('I want to change my restaurant reservation on 14-10-2026 under the name Steward phone number 0801111111');
       const response = await send('hotel or restaurant');
       expect(response.body.missing_fields).toEqual(['type of reservation']);
       expect(response.body.data).toEqual(expect.objectContaining({
@@ -2016,6 +2023,121 @@ const runRoutes = process.env.NO_LISTEN !== 'true';
     });
   });
 
+  describe('four-field reservation change identification', () => {
+    let fixtureNumber = 0;
+    let sessionId;
+    let originalBookings;
+
+    beforeEach(() => {
+      sessionId = `sess-four-field-lookup-${++fixtureNumber}`;
+      ['hotel', 'meeting', 'restaurant'].forEach((service_type, index) => {
+        state.bookings.push({
+          id: 300 + index, session_id: sessionId, service_type,
+          reservation_name: 'Sally', contact_phone: '0945934023',
+          date: '2026-10-13', end_date: service_type === 'hotel' ? '2026-10-16' : null,
+          start_time: '11:00:00', end_time: '13:00:00', people: 7,
+          status: 'confirmed', waitlisted: false,
+          created_at: new Date('2026-10-09T08:00:00Z'), updated_at: new Date('2026-10-09T08:00:00Z'),
+        });
+      });
+      originalBookings = state.bookings.map(cloneRow);
+      query.mockClear();
+      // The lookup must never use this model output to start a new booking.
+      mockChat.mockResolvedValue({ ...defaultChatResponse, intent: 'book_meeting', data: {
+        service_type: 'meeting', date: '13-10-2026', reservation_name: 'Sally',
+        start_time: '', end_time: '', people: null, phone_number: '',
+      } });
+    });
+
+    async function send(message) {
+      const response = await request(app).post('/api/chat').send({ session_id: sessionId, message });
+      expect(response.status).toBe(200);
+      expect(response.body.intent).toBe('modify_booking');
+      expect(response.body.missing_fields.every((field) => ['type of reservation', 'reservation name', 'date', 'phone number'].includes(field))).toBe(true);
+      expect(response.body.message).not.toMatch(/start_time|end_time|party size|attendee count|number of guests/i);
+      expect(state.bookings).toEqual(originalBookings);
+      expect(mockUpsertEvent).not.toHaveBeenCalled();
+      expect(mockChat).not.toHaveBeenCalled();
+      return response;
+    }
+
+    it.each(['booking change', 'change my booking', 'I would like to alter a booking'])(
+      'asks only for the four identification fields for "%s"', async (message) => {
+        const response = await send(message);
+        expect(response.body.missing_fields).toEqual(['type of reservation', 'reservation name', 'date', 'phone number']);
+        expect(response.body.data.date).toBe('');
+        expect(response.body.message).toContain('scheduled reservation date');
+      }
+    );
+
+    it.each([
+      ['hotel room', 'hotel', 300], ['meeting', 'meeting', 301], ['restaurant table', 'restaurant', 302],
+    ])('handles "%s Sally 13-10-2026" without asking for booking details', async (type, expectedType, id) => {
+      await send('booking change');
+      const criteria = await send(`${type} Sally 13-10-2026`);
+      expect(criteria.body.missing_fields).toEqual(['phone number']);
+      expect(criteria.body.data).toEqual(expect.objectContaining({
+        service_type: expectedType, reservation_name: 'Sally', date: '13-10-2026', modify_step: 'awaiting_verification',
+      }));
+      expect(criteria.body.data.edit_booking_id).toBeUndefined();
+      const found = await send('0945934023');
+      expect(found.body.data.edit_booking_id).toBe(id);
+      expect(found.body.data.modify_step).toBe('choose_field');
+    });
+
+    it('does not re-ask the type when it was already mentioned', async () => {
+      const response = await send('Change my hotel room booking');
+      expect(response.body.missing_fields).toEqual(['reservation name', 'date', 'phone number']);
+      expect(response.body.message).not.toContain('type of reservation');
+    });
+
+    it('starts a fresh identification request for a generic change even when a reservation was previously selected', async () => {
+      await send('booking change');
+      await send('meeting Sally 13-10-2026 0945934023');
+      const response = await send('I would like to change my booking');
+      expect(response.body.missing_fields).toEqual(['type of reservation', 'reservation name', 'date', 'phone number']);
+      expect(response.body.data.edit_booking_id).toBeUndefined();
+      expect(response.body.data.date).toBe('');
+    });
+
+    it('retains the original phone when it is supplied before type, name and date', async () => {
+      await send('booking change');
+      const phone = await send('0945934023');
+      expect(phone.body.missing_fields).toEqual(['type of reservation', 'reservation name', 'date']);
+      const found = await send('meeting Sally 13-10-2026');
+      expect(found.body.data.edit_booking_id).toBe(301);
+    });
+
+    it('clears an invalid phone correction instead of matching with a previously supplied number', async () => {
+      await send('booking change');
+      await send('0945934023');
+      const invalid = await send('meeting Sally 13-10-2026 phone number 123');
+      expect(invalid.body.data.edit_booking_id).toBeUndefined();
+      expect(invalid.body.missing_fields).toEqual(['phone number']);
+    });
+
+    it('accepts all four details in one identification reply', async () => {
+      await send('booking change');
+      const found = await send('meeting Sally 13-10-2026 0945934023');
+      expect(found.body.data.edit_booking_id).toBe(301);
+      expect(found.body.missing_fields).toEqual([]);
+    });
+
+    it('matches the scheduled date rather than the date the reservation was created', async () => {
+      const createdDate = await send('Change my meeting booking on 09-10-2026 name is Sally phone number 0945934023');
+      expect(createdDate.body.data.edit_booking_id).toBeUndefined();
+      const scheduledDate = await send('13-10-2026');
+      expect(scheduledDate.body.data.edit_booking_id).toBe(301);
+    });
+
+    it('keeps a wrong phone unverified even for a booking from the same conversation', async () => {
+      const wrong = await send('Change my meeting booking on 13-10-2026 name is Sally phone number 0809999999');
+      expect(wrong.body.data.edit_booking_id).toBeUndefined();
+      const found = await send('0945934023');
+      expect(found.body.data.edit_booking_id).toBe(301);
+    });
+  });
+
   describe('guided reservation alterations', () => {
     let fixtureNumber = 0;
     let sessionId;
@@ -2081,12 +2203,12 @@ const runRoutes = process.env.NO_LISTEN !== 'true';
 
     async function chooseUniqueReservation() {
       const opening = await send('I would like to alter a booking');
-      expect(opening.body.missing_fields).toEqual(['type of reservation', 'reservation name']);
-      expect(opening.body.message).not.toMatch(/need[^.]*date/i);
+      expect(opening.body.missing_fields).toEqual(['type of reservation', 'reservation name', 'date', 'phone number']);
+      expect(opening.body.message).toContain('scheduled reservation date');
       expect(opening.body.data.modify_step).toBe('awaiting_lookup');
       expectNoBookingChanges();
 
-      const found = await send('The reservation type is meeting and the name is Steward');
+      const found = await send('The reservation type is meeting and the name is Steward on 14-10-2026 phone number 0801111111');
       expect(found.body.data).toEqual(expect.objectContaining({
         edit_booking_id: 200, service_type: 'meeting', reservation_name: 'Steward',
         date: '14-10-2026', modify_step: 'choose_field', people: 7,
@@ -2099,7 +2221,7 @@ const runRoutes = process.env.NO_LISTEN !== 'true';
     function addSecondReservation() {
       state.bookings.push({
         ...state.bookings.find((booking) => booking.id === 200),
-        id: 201, date: '2026-10-21', start_time: '14:00:00', end_time: '15:00:00',
+        id: 201, date: '2026-10-14', start_time: '14:00:00', end_time: '15:00:00',
         google_event_id: 'second-guided-event', created_at: new Date('2026-10-02T00:00:00Z'),
       });
       originalBookings = state.bookings.map(cloneRow);
@@ -2107,7 +2229,7 @@ const runRoutes = process.env.NO_LISTEN !== 'true';
 
     async function offerReservationChoices() {
       await send('alter a booking');
-      const response = await send('Meeting, the name is Steward');
+      const response = await send('Meeting, the name is Steward on 14-10-2026 phone number 0801111111');
       expect(response.body.data.modify_step).toBe('awaiting_selection');
       expect(response.body.data.edit_booking_id).toBeUndefined();
       expect(response.body.data.reservation_options).toHaveLength(2);
@@ -2117,7 +2239,7 @@ const runRoutes = process.env.NO_LISTEN !== 'true';
       return response;
     }
 
-    it('completes the type/name-only alteration scenario and politely ends after No, Thank you', async () => {
+    it('completes the verified alteration scenario and politely ends after No, Thank you', async () => {
       await chooseUniqueReservation();
       const updated = await send('Change the date to October 16 this year and the guests to eight');
       expect(updated.body.intent).toBe('modify_booking');
@@ -2141,7 +2263,7 @@ const runRoutes = process.env.NO_LISTEN !== 'true';
       expect(mockChat).not.toHaveBeenCalled();
 
       const reopened = await send('I would like to alter a booking');
-      expect(reopened.body.missing_fields).toEqual(['type of reservation', 'reservation name']);
+      expect(reopened.body.missing_fields).toEqual(['type of reservation', 'reservation name', 'date', 'phone number']);
       expect(reopened.body.data.edit_booking_id).toBeUndefined();
       expect(reopened.body.data.modify_step).toBe('awaiting_lookup');
       expectNoBookingChanges();
@@ -2225,7 +2347,7 @@ const runRoutes = process.env.NO_LISTEN !== 'true';
       const originalMeeting = state.bookings.find((booking) => booking.id === 200);
       state.bookings = state.bookings.filter((booking) => ![2, 200].includes(booking.id));
       state.bookings.push({
-        ...originalMeeting, id: 201, date: '2026-10-21', start_time: '14:00:00', end_time: '15:00:00',
+        ...originalMeeting, id: 201, date: '2026-10-14', start_time: '14:00:00', end_time: '15:00:00',
         google_event_id: 'second-guided-event',
       }, { ...originalMeeting, id: 2 });
       originalBookings = state.bookings.map(cloneRow);
@@ -2252,7 +2374,7 @@ const runRoutes = process.env.NO_LISTEN !== 'true';
       expect(mockChat).not.toHaveBeenCalled();
     });
 
-    it.each(['October 14', 'the one at 9am'])(
+    it.each(['October 14 at 9am', 'the one at 9am'])(
       'selects the correct reservation using plain English: "%s"',
       async (selection) => {
         addSecondReservation();
@@ -2268,7 +2390,9 @@ const runRoutes = process.env.NO_LISTEN !== 'true';
 
     it('uses a volunteered date to narrow the type/name search to one reservation', async () => {
       addSecondReservation();
-      const found = await send('I want to alter my meeting reservation on 21-10-2026 under the name Steward');
+      state.bookings.find((booking) => booking.id === 201).date = '2026-10-21';
+      originalBookings = state.bookings.map(cloneRow);
+      const found = await send('I want to alter my meeting reservation on 21-10-2026 under the name Steward phone number 0801111111');
       expect(found.body.data.edit_booking_id).toBe(201);
       expect(found.body.data.date).toBe('21-10-2026');
       expect(found.body.data.modify_step).toBe('choose_field');
@@ -2363,15 +2487,19 @@ const runRoutes = process.env.NO_LISTEN !== 'true';
       expectNoBookingChanges();
     });
 
-    it('recovers reservations across conversations without requiring a date when type, name and original phone match', async () => {
+    it('requires the scheduled date as well as type, name and phone for reservation recovery', async () => {
       state.bookings.find((booking) => booking.id === 200).session_id = 'previous-guided-conversation';
       originalBookings = state.bookings.map(cloneRow);
       await send('alter a booking');
       const pending = await send('Meeting, the name is Steward');
-      expect(pending.body.data.modify_step).toBe('awaiting_verification');
-      expect(pending.body.missing_fields).toEqual(['phone number']);
+      expect(pending.body.data.modify_step).toBe('awaiting_lookup');
+      expect(pending.body.missing_fields).toEqual(['date', 'phone number']);
       expectNoBookingChanges();
-      const found = await send('0801111111');
+      const phoneOnly = await send('0801111111');
+      expect(phoneOnly.body.missing_fields).toEqual(['date']);
+      expect(phoneOnly.body.data.edit_booking_id).toBeUndefined();
+      expectNoBookingChanges();
+      const found = await send('14-10-2026');
       expect(found.body.data.edit_booking_id).toBe(200);
       expect(found.body.data.date).toBe('14-10-2026');
       expect(found.body.data.modify_step).toBe('choose_field');
@@ -2447,6 +2575,174 @@ const runRoutes = process.env.NO_LISTEN !== 'true';
       }));
       expect(response.body.data.booking_step).not.toBe('awaiting_service');
       expectNoBookingChanges();
+    });
+  });
+
+  describe('booking request accuracy', () => {
+    let sessionId;
+    let fixtureNumber = 0;
+    const originalTimezone = process.env.CALENDAR_TIMEZONE;
+    const wrongModelData = {
+      service_type: 'meeting', date: '20-10-2026', end_date: '',
+      start_time: '09:00', end_time: '10:00', people: 99,
+      reservation_name: 'Wrong guest', phone_number: '0809999999', notes: '',
+    };
+
+    beforeEach(() => {
+      seedAlterationInventory();
+      process.env.CALENDAR_TIMEZONE = 'Asia/Bangkok';
+      jest.useFakeTimers({
+        now: new Date('2026-10-09T08:56:00Z'),
+        doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'hrtime', 'performance', 'queueMicrotask'],
+      });
+      sessionId = `sess-request-accuracy-${++fixtureNumber}`;
+      query.mockClear();
+      mockChat.mockResolvedValue({ ...defaultChatResponse, intent: 'book_meeting', data: { ...wrongModelData } });
+    });
+
+    afterEach(() => {
+      jest.useRealTimers();
+      if (originalTimezone === undefined) delete process.env.CALENDAR_TIMEZONE;
+      else process.env.CALENDAR_TIMEZONE = originalTimezone;
+    });
+
+    async function send(message) {
+      const response = await request(app).post('/api/chat').send({ session_id: sessionId, message });
+      expect(response.status).toBe(200);
+      return response;
+    }
+
+    function expectNoBookingWrites() {
+      expect(state.bookings.filter((booking) => booking.session_id === sessionId)).toEqual([]);
+      expect(query.mock.calls.filter(([sql]) => /^(?:insert into|update|delete from) bookings\b/.test(normalizeSql(sql)))).toEqual([]);
+    }
+
+    const sallyDetails = "next Tuesday around 11am-1pm we're seven name is Sally phone number is 0945934023";
+
+    it('saves the exact screenshot request on October 13 despite incorrect model output', async () => {
+      await send('Book a meeting room');
+      const response = await send(sallyDetails);
+      expect(response.body.missing_fields).toEqual([]);
+      expect(response.body.data).toEqual(expect.objectContaining({
+        date: '13-10-2026', start_time: '11:00:00', end_time: '13:00:00',
+        people: 7, reservation_name: 'Sally', phone_number: '0945934023',
+      }));
+      expect(state.bookings.find((booking) => booking.session_id === sessionId)).toEqual(expect.objectContaining({
+        date: '2026-10-13', start_time: '11:00:00', end_time: '13:00:00',
+        people: 7, reservation_name: 'Sally', contact_phone: '0945934023',
+      }));
+    });
+
+    it.each(['31-02-2026', 'Tuesday or Wednesday', '13-10-2026 or 14-10-2026'])('asks for clarification before saving %s', async (date) => {
+      const response = await send(`Book a meeting on ${date} at 11am-1pm for seven guests name is Sally phone number 0945934023`);
+      expect(response.body.missing_fields).toContain('date');
+      expect(response.body.data.date).toBe('');
+      expectNoBookingWrites();
+      const corrected = await send('13-10-2026');
+      expect(corrected.body.data.date).toBe('13-10-2026');
+      expect(corrected.body.data.reservation_name).toBe('Sally');
+    });
+
+    it('does not accept a date invented by the model when the request supplies none', async () => {
+      const response = await send('Book a meeting at 11am-1pm for seven guests name is Sally phone number 0945934023');
+      expect(response.body.missing_fields).toContain('date');
+      expect(response.body.data.date).toBe('');
+      expectNoBookingWrites();
+    });
+
+    it('retains date, guests, times and phone when notes contain date and number words', async () => {
+      await send(`Book a meeting ${sallyDetails}`);
+      const response = await send('notes Needs 10 chairs by tomorrow at 5pm');
+      expect(response.body.data).toEqual(expect.objectContaining({
+        date: '13-10-2026', start_time: '11:00:00', end_time: '13:00:00',
+        people: 7, reservation_name: 'Sally', phone_number: '0945934023',
+        notes: 'Needs 10 chairs by tomorrow at 5pm',
+      }));
+    });
+
+    it('saves a changed draft contact number instead of restoring the old database phone', async () => {
+      await send(`Book a meeting ${sallyDetails}`);
+      const response = await send('phone number is 0803245774');
+      expect(response.body.data.phone_number).toBe('0803245774');
+      expect(response.body.data.date).toBe('13-10-2026');
+      expect(state.bookings.find((booking) => booking.session_id === sessionId).contact_phone).toBe('0803245774');
+    });
+
+    it('preserves collected facts when the model fails on a follow-up', async () => {
+      await send(`Book a meeting ${sallyDetails}`);
+      const original = state.bookings.map(cloneRow);
+      mockChat.mockResolvedValue({ ...defaultChatResponse, message: 'Please try again.', data: {} });
+      const response = await send('Can you repeat that?');
+      expect(response.body.data).toEqual(expect.objectContaining({
+        date: '13-10-2026', people: 7, reservation_name: 'Sally', phone_number: '0945934023',
+      }));
+      expect(state.bookings).toEqual(original);
+    });
+
+    it('keeps the other time when only one draft time is corrected', async () => {
+      await send(`Book a meeting ${sallyDetails}`);
+      const start = await send('start time to 12pm');
+      expect(start.body.data.start_time).toMatch(/^12:00/);
+      expect(start.body.data.end_time).toMatch(/^13:00/);
+      const end = await send('end time to 2pm');
+      expect(end.body.data.start_time).toMatch(/^12:00/);
+      expect(end.body.data.end_time).toMatch(/^14:00/);
+    });
+
+    it('does not save a booking when checking availability fails', async () => {
+      const originalImplementation = query.getMockImplementation();
+      query.mockImplementation(async (sql, params) => {
+        if (normalizeSql(sql).includes('from meeting_rooms')) throw new Error('Database unavailable');
+        return originalImplementation(sql, params);
+      });
+      try {
+        const response = await send(`Book a meeting ${sallyDetails}`);
+        expect(response.body.missing_fields).toEqual(['availability']);
+        expect(response.body.message).toContain('could not check availability');
+        expectNoBookingWrites();
+      } finally {
+        query.mockImplementation(originalImplementation);
+      }
+    });
+
+    it.each([
+      ['check-in 13-10-2026 and check-out 16-10-2026', '13-10-2026', '16-10-2026'],
+      ['check-out 16-10-2026 and check-in 13-10-2026', '13-10-2026', '16-10-2026'],
+      ['from 13-10-2026 to 16-10-2026', '13-10-2026', '16-10-2026'],
+      ['next Tuesday for three nights', '13-10-2026', '16-10-2026'],
+    ])('separates hotel dates in %s', async (dates, arrival, departure) => {
+      const response = await send(`Book a hotel ${dates} for two guests name is Sally phone number 0945934023`);
+      expect(response.body.intent).toBe('book_hotel');
+      expect(response.body.data.date).toBe(arrival);
+      expect(response.body.data.end_date).toBe(departure);
+    });
+
+    it('collects check-out in a separate message without changing the arrival', async () => {
+      await send('Book a hotel check-in next Tuesday for two guests name is Sally phone number 0945934023');
+      const response = await send('16-10-2026');
+      expect(response.body.data.date).toBe('13-10-2026');
+      expect(response.body.data.end_date).toBe('16-10-2026');
+    });
+
+    it('does not read a reservation name Friday as a booking date', async () => {
+      const response = await send('Book a meeting on 13-10-2026 at 11am-1pm for seven guests name is Friday phone number 0945934023');
+      expect(response.body.data.date).toBe('13-10-2026');
+      expect(response.body.data.reservation_name).toBe('Friday');
+    });
+
+    it.each([
+      ['Book a hotel check-in 16-10-2026 check-out 13-10-2026 for two guests name is Sally phone number 0945934023', 'check-out date'],
+      ['Book a meeting on 13-10-2026 from 1pm-11am for seven guests name is Sally phone number 0945934023', 'end_time'],
+      ['Book a meeting on 13-10-2026 from 25am-1pm for seven guests name is Sally phone number 0945934023', 'start_time'],
+      ['Book a meeting on 13-10-2026 at 11am-1pm for zero guests name is Sally phone number 0945934023', 'people'],
+      ['Book a meeting on 13-10-2026 at 11am-1pm for -2 guests name is Sally phone number 0945934023', 'people'],
+      ['Book a meeting on 13-10-2026 at 11am-1pm for seven guests phone number 0945934023', 'reservation name'],
+      ['Book a meeting on 13-10-2026 at 11am-1pm for seven guests name is Sally phone number 123', 'phone number'],
+      ['Book a restaurant on 13-10-2026 at 11:30pm for seven guests name is Sally phone number 0945934023', 'end_time'],
+    ])('prevents invalid or missing required values in %s', async (message, missing) => {
+      const response = await send(message);
+      expect(response.body.missing_fields).toContain(missing);
+      expectNoBookingWrites();
     });
   });
 
@@ -2765,7 +3061,7 @@ const runRoutes = process.env.NO_LISTEN !== 'true';
       .post('/api/chat')
       .send({
         session_id: 'sess-slip',
-        message: 'I want to see my already reserved booking on 15-05-2026 name John and type is dinner',
+        message: 'I want to see my already reserved booking on 15-05-2026 name John and type is dinner phone number 0800568109',
       });
 
     expect(res.status).toBe(200);

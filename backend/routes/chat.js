@@ -13,7 +13,7 @@ import { resolveBookingService, hasBookingServiceExpression } from '../services/
 import { validateBookingAlteration } from '../services/bookingAlteration.js';
 import {
     calendarToday, bookingDateKey, addBookingDays,
-    bookingStayDays, extractNaturalBookingDate, hasBookingDateExpression,
+    bookingStayDays, extractNaturalBookingDate, resolveNaturalBookingDate, hasBookingDateExpression,
 } from '../services/bookingDates.js';
 
 const router = express.Router();
@@ -65,10 +65,10 @@ function extractStayLengthDays(message) {
     const text = normalizeEditValue(message).toLowerCase();
     if (/\b(?:staying|stay|book(?:ing)?|reserve|reservation)?\s*(?:for\s+)?(?:a|one)\s+week\b/.test(text)) return 7;
 
-    const durationMatch = text.match(/\b(?:staying|stay|book(?:ing)?|reserve|reservation)?\s*(?:for\s+)?(\d{1,2})\s+(night|nights|day|days|week|weeks)\b/);
+    const durationMatch = text.toLowerCase().match(new RegExp(`\\b(?:staying|stay|book(?:ing)?|reserve|reservation)?\\s*(?:for\\s+)?(${PEOPLE_PATTERN})\\s+(night|nights|day|days|week|weeks)\\b`));
     if (!durationMatch) return null;
 
-    const amount = Number(durationMatch[1]);
+    const amount = PEOPLE_WORDS[durationMatch[1]] || Number(durationMatch[1]);
     if (!Number.isFinite(amount) || amount <= 0) return null;
     const unit = durationMatch[2];
     return unit.startsWith('week') ? amount * 7 : amount;
@@ -76,51 +76,59 @@ function extractStayLengthDays(message) {
 
 function parseTime(value) {
     if (!value) return null;
-    if (/^\d{2}:\d{2}(:\d{2})?$/.test(value)) return value;
+    if (/^\d{2}:\d{2}(:\d{2})?$/.test(value)
+        && value.split(':').every((part, index) => Number(part) < (index === 0 ? 24 : 60))) return value;
     return null;
 }
 
 function getRequiredFields(intent, data) {
+    const positivePeople = Number.isSafeInteger(data.people) && data.people > 0;
+    const validPhone = /^\+?[\d ()-]+$/.test(data.phone_number || '')
+        && (data.phone_number || '').replace(/\D/g, '').length >= 7
+        && (data.phone_number || '').replace(/\D/g, '').length <= 15;
+    const validDate = Boolean(bookingDateKey(data.date));
+    const validEndDate = Boolean(bookingStayDays(data.date, data.end_date));
+    const validStart = Boolean(parseTime(data.start_time));
+    const seconds = (time) => time.split(':').reduce((total, part, index) => total + Number(part) * [3600, 60, 1][index], 0);
+    const validEnd = validStart && Boolean(parseTime(data.end_time)) && seconds(data.end_time) > seconds(data.start_time);
+    const validRestaurantEnd = data.end_time ? validEnd : validStart && Number(data.start_time.slice(0, 2)) < 23;
+    const hasName = Boolean(data.reservation_name?.trim());
     switch (intent) {
         case 'book_restaurant':
             return {
-                valid: data.date && data.start_time && (data.people || data.people === 0) && data.phone_number,
+                valid: validDate && validStart && validRestaurantEnd && positivePeople && hasName && validPhone,
                 missing: [
-                    !data.date && 'date',
-                    !data.start_time && 'start_time',
-                    (!data.people && data.people !== 0) && 'people',
-                    !data.reservation_name && 'reservation name',
-                    !data.phone_number && 'phone number',
+                    !validDate && 'date',
+                    !validStart && 'start_time',
+                    validStart && !validRestaurantEnd && 'end_time',
+                    !positivePeople && 'people',
+                    !hasName && 'reservation name',
+                    !validPhone && 'phone number',
                 ].filter(Boolean),
             };
 
         case 'book_hotel':
             return {
-                valid: data.date && data.end_date && (data.people || data.people === 0) && data.phone_number,
+                valid: validDate && validEndDate && positivePeople && hasName && validPhone,
                 missing: [
-                    !data.date && 'check-in date',
-                    !data.end_date && 'check-out date',
-                    (!data.people && data.people !== 0) && 'guests',
-                    !data.reservation_name && 'reservation name',
-                    !data.phone_number && 'phone number',
+                    !validDate && 'check-in date',
+                    !validEndDate && 'check-out date',
+                    !positivePeople && 'guests',
+                    !hasName && 'reservation name',
+                    !validPhone && 'phone number',
                 ].filter(Boolean),
             };
 
         case 'book_meeting':
             return {
-                valid:
-                    data.date &&
-                    data.start_time &&
-                    data.end_time &&
-                    (data.people || data.people === 0) &&
-                    data.phone_number,
+                valid: validDate && validStart && validEnd && positivePeople && hasName && validPhone,
                 missing: [
-                    !data.date && 'date',
-                    !data.start_time && 'start_time',
-                    !data.end_time && 'end_time',
-                    (!data.people && data.people !== 0) && 'people',
-                    !data.reservation_name && 'reservation name',
-                    !data.phone_number && 'phone number',
+                    !validDate && 'date',
+                    !validStart && 'start_time',
+                    !validEnd && 'end_time',
+                    !positivePeople && 'people',
+                    !hasName && 'reservation name',
+                    !validPhone && 'phone number',
                 ].filter(Boolean),
             };
 
@@ -198,13 +206,15 @@ function buildAlternativeMessage(data) {
 
 function getModifyLookupFields(data) {
     const validType = ['hotel', 'restaurant', 'meeting'].includes(data.service_type);
-    const validDate = !data.date_invalid && (!data.date || bookingDateKey(data.date));
+    const validDate = !data.date_invalid && Boolean(bookingDateKey(data.date));
+    const validPhone = Boolean(data.lookup_phone);
     return {
-        valid: validDate && validType && data.reservation_name,
+        valid: validDate && validType && data.reservation_name && validPhone,
         missing: [
             !validType && 'type of reservation',
             !data.reservation_name && 'reservation name',
             !validDate && 'date',
+            !validPhone && 'phone number',
         ].filter(Boolean),
     };
 }
@@ -237,7 +247,8 @@ function detectModifyField(message) {
 function extractTextEditSpan(field, message) {
     const label = field === 'reservation_name' ? '(?:reservation |guest )?name' : '(?:notes?|special requests?)';
     const nextField = '(?:date|check[ -]?in|check[ -]?out|start time|end time|time|guests?|people|phone|contact|reservation name|name|notes?)';
-    return message.match(new RegExp(`\\b${label}\\s+(?:(?:is|to|as)\\s+)?(.+?)(?=\\s+(?:and|with)\\s+(?:(?:change|update|set)\\s+(?:the\\s+)?)?${nextField}\\b|[.!?]|$)`, 'i'));
+    const punctuation = field === 'reservation_name' ? '[.,!?]' : '[.!?]';
+    return message.match(new RegExp(`\\b${label}\\s+(?:(?:is|to|as)\\s+)?(.+?)(?=\\s+(?:and|with)\\s+(?:(?:change|update|set)\\s+(?:the\\s+)?)?${nextField}\\b|\\s+(?:phone(?: number)?|mobile(?: number)?|contact number)\\b|${punctuation}|$)`, 'i'));
 }
 
 function extractModifyValue(field, message, today, allowBare = false) {
@@ -272,6 +283,7 @@ function extractModifyValue(field, message, today, allowBare = false) {
         return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:00`;
     }
     if (field === 'people') {
+        if (/\b(?:minus|negative)\s+\w+|(?:^|\s)-\d+\s+(?:guests?|people|persons?|pax)\b/i.test(text)) return null;
         const match = text.toLowerCase().match(new RegExp(`\\b(${PEOPLE_PATTERN})\\s+(?:guests?|people|persons?|adults?|pax)\\b`))
             || text.toLowerCase().match(new RegExp(`\\b(?:guests?|people|party(?: size)?)\\s*(?:count|number)?\\s*(?:is|to|for|of|:)?\\s*(${PEOPLE_PATTERN})\\b`));
         const bare = text.toLowerCase().replace(/^(?:actually |(?:make it|set it to|set to|change it to|change to|to|for)\s+)/, '');
@@ -360,7 +372,9 @@ function buildModifyPrompt(field) {
 function buildModifyLookupPrompt(missingFields, candidates = []) {
     if (candidates.length > 1) return `Which reservation type do you mean: ${candidates.join(' or ')}?`;
     const typeHint = missingFields.includes('type of reservation') ? ' The type can be hotel, restaurant, or meeting.' : '';
-    return `To find your booking, I'll need a few details: ${missingFields.join(', ')}.${typeHint}`;
+    const labels = missingFields.map((field) => field === 'date' ? 'scheduled reservation date' : field === 'phone number' ? 'original booking phone number' : field);
+    const dateHint = missingFields.includes('date') ? ' Use the hotel check-in date, dining date, or meeting date.' : '';
+    return `To find your booking, I'll need a few details: ${labels.join(', ')}.${typeHint}${dateHint}`;
 }
 
 function wantsReservationSlip(message) {
@@ -415,7 +429,12 @@ function extractLookupPhone(message, today) {
     if (labelled) return labelled;
     // Numeric dates are corrections, not a reservation's contact number.
     if (/^(?:\d{1,2}[-/]\d{1,2}[-/]\d{2,4}|\d{4}-\d{2}-\d{2})$/.test(message.trim())) return null;
-    return extractModifyValue('contact_phone', message, today, true);
+    const bare = extractModifyValue('contact_phone', message, today, true);
+    if (bare) return bare;
+    // Also accept an unlabelled phone in a compact identification reply.
+    const withoutDates = message.replace(/\b(?:\d{4}-\d{2}-\d{2}|\d{1,2}[-/]\d{1,2}[-/]\d{4})\b/g, '');
+    const phones = [...withoutDates.matchAll(/(?<![\w+])\+?\d{7,15}(?!\w)/g)];
+    return phones.length === 1 ? phones[0][0] : null;
 }
 
 function redactLookupPhone(message) {
@@ -425,22 +444,105 @@ function redactLookupPhone(message) {
 function extractLookupDate(message, todayFormatted) {
     const date = extractNaturalBookingDate(message, todayFormatted);
     if (date || hasBookingDateExpression(message)) return date;
-    const dayMatch = normalizeEditValue(message).match(/\b(?:on\s+)?(\d{1,2})\b/i);
+    // Accept a short day-only reply, while keeping unrelated booking numbers
+    // (guest counts, times, and phone numbers) out of date selection.
+    const text = normalizeEditValue(message);
+    const dayMatch = text.match(/^on\s+(\d{1,2})$/i) || text.match(/^(\d{1,2})$/);
     return dayMatch ? extractNaturalBookingDate(`${dayMatch[1]}th`, todayFormatted) : '';
 }
 
-function extractBookingDate(message, todayFormatted) {
-    return extractNaturalBookingDate(message, todayFormatted);
+function extractBookingTextFields(message) {
+    let text = message;
+    const fields = {};
+    for (const field of ['reservation_name', 'notes']) {
+        const span = extractTextEditSpan(field, text);
+        if (!span) continue;
+        fields[field] = span[1].trim();
+        text = `${text.slice(0, span.index)} ${text.slice(span.index + span[0].length)}`;
+    }
+    return { text: redactLookupPhone(text), contactText: text, fields };
 }
 
-function extractExplicitBookingDates(message, todayFormatted) {
-    const date = extractBookingDate(message, todayFormatted);
-    const stayLengthDays = extractStayLengthDays(message);
-
-    return {
-        date,
-        end_date: date && stayLengthDays ? addDaysDisplay(date, stayLengthDays) : '',
+function extractExplicitBookingDates(message, todayFormatted, service, state = {}) {
+    const fields = {};
+    const issues = {};
+    const assign = (field, text) => {
+        const result = resolveNaturalBookingDate(text, todayFormatted);
+        if (result.status === 'absent') return;
+        fields[field] = result.date;
+        if (result.status !== 'resolved') issues[field] = result.status;
     };
+    if (service === 'hotel') {
+        const labels = [...message.matchAll(/\b(check[ -]?in|arrival|check[ -]?out|departure)(?: date)?\b/ig)];
+        if (labels.length) {
+            // Each labelled hotel date has its own span, regardless of order.
+            for (let index = 0; index < labels.length; index += 1) {
+                const label = labels[index];
+                const field = /out|departure/i.test(label[1]) ? 'end_date' : 'date';
+                assign(field, message.slice(label.index + label[0].length, labels[index + 1]?.index));
+            }
+            // A date preceding "check-out" is an unlabelled check-in.
+            if (!Object.hasOwn(fields, 'date')) assign('date', message.slice(0, labels[0].index));
+        } else {
+            const range = message.match(/\bfrom\s+(.+?)\s+(?:to|until|through)\s+(.+)/i);
+            if (range && hasBookingDateExpression(range[1]) && hasBookingDateExpression(range[2])) {
+                assign('date', range[1]);
+                assign('end_date', range[2]);
+            } else {
+                const awaitingCheckout = state.date && !state.end_date
+                    && !/\b(?:change|move|reschedule|check[ -]?in|arrival)\b/i.test(message);
+                assign(awaitingCheckout ? 'end_date' : 'date', message);
+            }
+        }
+        const stayLengthDays = extractStayLengthDays(message);
+        const checkIn = fields.date || state.date;
+        if (stayLengthDays && checkIn && !Object.hasOwn(fields, 'end_date')) {
+            fields.end_date = addDaysDisplay(checkIn, stayLengthDays);
+        }
+    } else {
+        assign('date', message);
+    }
+    return { ...fields, issues };
+}
+
+function applyExplicitBookingDetails(parsed, message, today, state) {
+    const { text, contactText, fields } = extractBookingTextFields(message);
+    const service = parsed.data.service_type;
+    const sameService = !state.service_type || state.service_type === service;
+    const previous = sameService ? state : {};
+    const dates = extractExplicitBookingDates(text, today, service, previous);
+    for (const field of ['date', 'end_date']) {
+        // Calendar fields come from the request or previously collected state.
+        // An unresolved/invalid correction deliberately clears the old value.
+        parsed.data[field] = Object.hasOwn(dates, field) ? dates[field] : previous[field] || '';
+    }
+    Object.assign(parsed.data, fields);
+    const phone = extractLookupPhone(contactText, today);
+    if (phone) parsed.data.phone_number = phone;
+    else parsed.data.phone_number = /\b(?:phone|mobile|telephone|contact number)\b/i.test(contactText) ? '' : previous.phone_number || '';
+    if (previous.reservation_name && !fields.reservation_name) parsed.data.reservation_name = previous.reservation_name;
+    else if (!fields.reservation_name && parsed.data.reservation_name
+        && !message.toLowerCase().includes(parsed.data.reservation_name.toLowerCase())) parsed.data.reservation_name = '';
+    if (previous.notes && !fields.notes) parsed.data.notes = previous.notes;
+    const people = extractModifyValue('people', text, today)
+        || (() => {
+            const match = text.toLowerCase().match(new RegExp(`\\b(?:we(?:'re| are)|there (?:are|will be)|party of|family of|for)\\s+(${PEOPLE_PATTERN})\\b(?![-/:]|\\s+(?:nights?|days?|weeks?))`));
+            return match ? PEOPLE_WORDS[match[1]] || Number(match[1]) : null;
+        })();
+    if (people !== null) parsed.data.people = people;
+    else if (previous.people && !/\b(?:guests?|people|persons?|party|pax)\b/i.test(text)) parsed.data.people = previous.people;
+    else parsed.data.people = null;
+    const startText = text.replace(/\b(?:end|finish|ending|finishing) time\b.*$/i, '');
+    const timeCues = {
+        start_time: /\b(?:time|hours?|noon|midnight)\b|\b\d{1,2}\s*(?:am|pm)\b|\d{1,2}:\d{2}/i.test(startText),
+        end_time: /\b(?:end|finish|ending|finishing) time\b|\b(?:\d{1,2}:\d{2}|\d{1,2}\s*(?:am|pm))\s*(?:to|until|[-–])\s*\d/i.test(text),
+    };
+    for (const field of ['start_time', 'end_time']) {
+        const explicit = extractModifyValue(field, text, today);
+        if (explicit) parsed.data[field] = explicit;
+        else parsed.data[field] = !timeCues[field] ? previous[field] || '' : '';
+    }
+    return dates;
 }
 
 function extractInventoryPreference(message) {
@@ -461,17 +563,23 @@ function extractInventoryPreference(message) {
 function extractLookupCriteria(message, todayFormatted) {
     const text = normalizeEditValue(message);
     const namePatterns = [
-        /\bname\s+is\s+([a-z][a-z' -]{0,40}?)(?=\s+(?:and|type|with|for|on|in|under)\b|[.,!?]|$)/i,
-        /\b(?:under\s+the\s+)?name\s+([a-z][a-z' -]{0,40}?)(?=\s+(?:and|type|with|for|on|in|under)\b|[.,!?]|$)/i,
-        /\bfor\s+([a-z][a-z' -]{0,40}?)(?=\s+(?:and|type|with|on|in|under)\b|[.,!?]|$)/i,
+        /\bname\s+is\s+([a-z][a-z' -]{0,40}?)(?=\s+(?:and|type|with|for|on|in|under|phone|mobile|telephone|contact)\b|\s+\d|[.,!?]|$)/i,
+        /\b(?:under\s+the\s+)?name\s+([a-z][a-z' -]{0,40}?)(?=\s+(?:and|type|with|for|on|in|under|phone|mobile|telephone|contact)\b|\s+\d|[.,!?]|$)/i,
+        /\bfor\s+([a-z][a-z' -]{0,40}?)(?=\s+(?:and|type|with|on|in|under|phone|mobile|telephone|contact)\b|\s+\d|[.,!?]|$)/i,
     ];
     const reservationNameMatch = namePatterns.map((pattern) => text.match(pattern)).find(Boolean);
-    const reservation_name = reservationNameMatch ? reservationNameMatch[1].trim().replace(/\s+/g, ' ') : '';
+    const compact = !reservationNameMatch && text.match(/^(?:hotel(?:\s+rooms?)?|meeting(?:\s+rooms?)?|conference room|boardroom|restaurant(?:\s+tables?)?)\s*[,;:]?\s+([\p{L}][\p{L}\p{M}'’-]*(?:\s+[\p{L}][\p{L}\p{M}'’-]*){0,3}?)\s*(?=\s+(?:on\s+)?\d|\s+phone\b|[.,;]|$)/iu);
+    const compactName = compact && !/\b(?:not|or|and|type|reservation|booking|date|phone|room|table|please|on)\b/i.test(compact[1]) ? compact[1] : '';
+    const reservation_name = reservationNameMatch ? reservationNameMatch[1].trim().replace(/\s+/g, ' ') : compactName;
     // Names can contain date/type words (for example May or Friday). Only
     // interpret the surrounding text as the reservation date and service.
-    const detailsText = redactLookupPhone(reservationNameMatch
+    let detailsText = redactLookupPhone(reservationNameMatch
         ? `${text.slice(0, reservationNameMatch.index)} ${text.slice(reservationNameMatch.index + reservationNameMatch[0].length)}`
         : text);
+    if (compactName) {
+        const index = text.indexOf(compactName);
+        detailsText = redactLookupPhone(`${text.slice(0, index)} ${text.slice(index + compactName.length)}`);
+    }
     const service = resolveBookingService(detailsText);
     const date = extractLookupDate(detailsText, todayFormatted);
 
@@ -498,6 +606,9 @@ function extractLookupCorrections(message, todayFormatted) {
         updates.service_candidates = criteria.service_candidates;
     }
     if (criteria.reservation_name) updates.reservation_name = criteria.reservation_name;
+    if (/\b(?:phone|telephone|mobile|contact number)\b/i.test(text)) {
+        updates.lookup_phone = extractLookupPhone(text, todayFormatted) || '';
+    }
 
     const bareName = text.replace(/^(?:actually[,:]?|it(?:'s| is)|my name is|the name is)\s+/i, '').replace(/[.!]$/, '').trim();
     const isName = /^[\p{L}][\p{L}\p{M}'’-]*(?:\s+[\p{L}][\p{L}\p{M}'’-]*){0,3}$/u.test(bareName);
@@ -510,26 +621,11 @@ function extractLookupCorrections(message, todayFormatted) {
     return updates;
 }
 
-async function findBookingForLookup(session_id, criteria) {
-    const result = await query(
-        `SELECT * FROM bookings
-         WHERE session_id = $1
-           AND status IN ('pending', 'confirmed', 'modified')
-           AND ($2 = '' OR service_type = $2)
-           AND ($3 = '' OR date = NULLIF($3, '')::date)
-           AND ($4 = '' OR LOWER(reservation_name) = LOWER($4))
-         ORDER BY created_at DESC LIMIT 11`,
-        [session_id, criteria.service_type || '', parseDate(criteria.date) || '', criteria.reservation_name || '']
-    );
-
-    return result.rows;
-}
-
 async function findRecoveredBooking(criteria, phone) {
     const result = await query(
         `SELECT * FROM bookings
          WHERE status IN ('pending', 'confirmed', 'modified')
-           AND service_type = $1 AND ($2 = '' OR date = NULLIF($2, '')::date)
+           AND service_type = $1 AND date = $2::date
            AND LOWER(reservation_name) = LOWER($3)
            AND regexp_replace(COALESCE(contact_phone, ''), '[^0-9]', '', 'g') = $4
          ORDER BY created_at DESC LIMIT 11`,
@@ -552,10 +648,11 @@ function buildReservationChoicesMessage(options) {
 }
 
 async function respondToBookingLookup({ res, session_id, message, sessionToken, criteria, phone, action = 'modify', selectedBookingId }) {
-    const lookup = getModifyLookupFields(criteria);
+    const originalPhone = phone || criteria.lookup_phone || '';
+    const lookup = getModifyLookupFields({ ...criteria, lookup_phone: originalPhone });
     const intent = action === 'cancel' ? 'cancel_booking' : 'modify_booking';
     let matches = [];
-    if (lookup.valid) {
+    if (lookup.valid || selectedBookingId) {
         if (selectedBookingId) {
             const selected = await query(
                 `SELECT * FROM bookings WHERE id = $1 AND status IN ('pending', 'confirmed', 'modified')`,
@@ -563,8 +660,7 @@ async function respondToBookingLookup({ res, session_id, message, sessionToken, 
             );
             matches = selected.rows;
         } else {
-            matches = await findBookingForLookup(session_id, criteria);
-            if (!matches.length && phone) matches = await findRecoveredBooking(criteria, phone);
+            matches = await findRecoveredBooking(criteria, originalPhone);
         }
     }
 
@@ -576,6 +672,7 @@ async function respondToBookingLookup({ res, session_id, message, sessionToken, 
         service_type: criteria.service_type || '', service_candidates: criteria.service_candidates || [],
         date: criteria.date || '', reservation_name: criteria.reservation_name || '',
         date_invalid: criteria.date_invalid || false,
+        lookup_phone: originalPhone, phone_number: originalPhone,
         modify_mode: 'modify_booking', lookup_action: action,
     };
     if (booking) {
@@ -606,14 +703,15 @@ async function respondToBookingLookup({ res, session_id, message, sessionToken, 
     } else {
         missing = lookup.valid ? ['phone number'] : lookup.missing;
         state = { ...searchState,
-            modify_step: lookup.valid ? 'awaiting_verification' : 'awaiting_lookup', modify_missing: missing };
+            modify_step: lookup.valid || (lookup.missing.length === 1 && lookup.missing[0] === 'phone number')
+                ? 'awaiting_verification' : 'awaiting_lookup', modify_missing: missing };
         reply = !lookup.valid ? buildModifyLookupPrompt(missing, state.service_candidates)
-            : phone ? "I couldn't match a reservation with those details and that phone number. Please check the original booking phone number, or correct the date, type, or name."
+            : originalPhone ? "I couldn't match a reservation with those details and that phone number. Please check the original booking phone number, or correct the scheduled reservation date, type, or name."
                 : 'To find a reservation from another conversation, please give the phone number used for the original booking. You can also correct the date, type, or name.';
     }
     sessionState.set(session_id, state);
     await saveConversation(session_id, message, reply);
-    const { lookup_candidate_ids, ...publicState } = state;
+    const { lookup_candidate_ids, lookup_phone, ...publicState } = state;
     return res.json({
         intent, message: reply, speak: reply, data: publicState, missing_fields: missing,
         confidence: booking ? 1 : 0.9,
@@ -750,20 +848,13 @@ router.post('/', async (req, res) => {
             sessionState.set(session_id, state);
         }
 
-        if (wantsExistingReservationChange(normalizedMessage) && (state.edit_booking_id || state.id)
-            && !isReservationLookup(normalizedMessage)) {
-            state = {
-                ...state,
-                modify_mode: 'modify_booking',
-                modify_step: state.modify_step || 'choose_field',
-                edit_booking_id: state.edit_booking_id || state.id,
-            };
-        }
-
         const lookupPending = ['awaiting_lookup', 'awaiting_verification', 'awaiting_selection'].includes(state.modify_step);
         const cancellation = wantsReservationCancellation(normalizedMessage);
+        const startsChangeLookup = wantsExistingReservationChange(normalizedMessage)
+            && (!state.edit_booking_id || !state.modify_step
+                || Object.keys(extractModifyChanges(normalizedMessage, today, {}).changes).length === 0);
         if (!lookupPending && (isReservationLookup(normalizedMessage) || cancellation
-            || (wantsExistingReservationChange(normalizedMessage) && !state.edit_booking_id))) {
+            || startsChangeLookup)) {
             const criteria = extractLookupCriteria(normalizedMessage, today);
             const hasCriteria = Boolean(criteria.date || criteria.service_type || criteria.reservation_name || criteria.service_candidates.length);
             const matchesSelection = (!criteria.date || parseDate(criteria.date) === parseDate(state.date))
@@ -774,7 +865,7 @@ router.post('/', async (req, res) => {
                 return respondToBookingLookup({ res, session_id, message, sessionToken, criteria: state,
                     action: 'cancel', selectedBookingId: state.edit_booking_id || state.id });
             }
-            if (!(wantsReservationSlip(normalizedMessage) && !hasCriteria && !cancellation)) {
+            if (!(wantsReservationSlip(normalizedMessage) && !hasCriteria && !cancellation && !startsChangeLookup)) {
                 return respondToBookingLookup({ res, session_id, message, sessionToken, criteria,
                     phone: extractLookupPhone(normalizedMessage, today), action: cancellation ? 'cancel' : 'modify' });
             }
@@ -844,7 +935,7 @@ router.post('/', async (req, res) => {
                 }
                 const reply = `Please choose one reservation before I make any changes. ${buildReservationChoicesMessage(options)}`;
                 await saveConversation(session_id, message, reply);
-                const { lookup_candidate_ids, ...publicState } = state;
+                const { lookup_candidate_ids, lookup_phone, ...publicState } = state;
                 return res.json({ intent: state.lookup_action === 'cancel' ? 'cancel_booking' : 'modify_booking',
                     message: reply, speak: reply, data: publicState, missing_fields: ['reservation selection'],
                     confidence: 1, session_token: sessionToken });
@@ -1018,10 +1109,11 @@ router.post('/', async (req, res) => {
             || (wantsFreshReservation(normalizedMessage) && /\b(book|reserve)\b/i.test(normalizedMessage));
         if (creatingBooking && requestedService.ambiguous) {
             const lookupDetails = extractLookupCriteria(normalizedMessage, today);
+            applyExplicitBookingDetails(parsed, normalizedMessage, today, state);
             state = {
                 ...state, ...parsed.data,
-                date: lookupDetails.date || state.date || parsed.data.date,
-                reservation_name: lookupDetails.reservation_name || state.reservation_name || parsed.data.reservation_name,
+                date: parsed.data.date,
+                reservation_name: parsed.data.reservation_name || lookupDetails.reservation_name,
                 service_type: '', service_candidates: requestedService.candidates,
                 booking_step: 'awaiting_service',
             };
@@ -1047,6 +1139,13 @@ router.post('/', async (req, res) => {
             }
         }
 
+        // A failed or conversational model response cannot erase collected
+        // reservation facts or trigger booking writes.
+        if (!validation.success || ['unknown', 'greeting', 'farewell'].includes(parsed.intent)) {
+            await saveConversation(session_id, message, parsed.message);
+            return res.json({ ...parsed, data: state, session_token: sessionToken });
+        }
+
         if (inventoryPreference) {
             parsed.data.preferred_inventory = inventoryPreference;
             parsed.data.notes = [parsed.data.notes, `Requested option: ${inventoryPreference}`]
@@ -1060,21 +1159,8 @@ router.post('/', async (req, res) => {
             }
         }
 
-        // Fallback manual phone extraction if LLM misses it
-        if (!parsed.data.phone_number) {
-            const phoneMatch = message.match(/(\+\d{1,3}[- ]?)?\d{10}/);
-            if (phoneMatch) {
-                parsed.data.phone_number = phoneMatch[0];
-            }
-        }
-
-        const explicitBookingDates = extractExplicitBookingDates(normalizedMessage, today);
-        if (explicitBookingDates.date) {
-            parsed.data.date = explicitBookingDates.date;
-        }
-        if (parsed.intent === 'book_hotel' && explicitBookingDates.end_date) {
-            parsed.data.end_date = explicitBookingDates.end_date;
-        }
+        const explicitBookingDates = ['book_hotel', 'book_restaurant', 'book_meeting'].includes(parsed.intent)
+            ? applyExplicitBookingDetails(parsed, normalizedMessage, today, state) : { issues: {} };
 
         // MERGE STATE (CRITICAL FIX)
         if (parsed.intent === 'new_booking') {
@@ -1093,21 +1179,6 @@ router.post('/', async (req, res) => {
                         phone_number: state.phone_number || ""
                     };
                 }
-            }
-
-            // HOTEL FIX: Detect if the LLM mistakenly put only a checkout date in `date`.
-            // Do not apply this when the user explicitly gave a new check-in date.
-            if (
-                state.service_type === 'hotel' &&
-                !explicitBookingDates.date &&
-                parsed.data.date &&
-                state.date &&
-                parsed.data.date !== state.date &&
-                !parsed.data.end_date
-            ) {
-                // If we already have a check-in date, and LLM gives a NEW date, treat it as checkout
-                parsed.data.end_date = parsed.data.date;
-                parsed.data.date = state.date; 
             }
 
             state = {
@@ -1141,9 +1212,15 @@ router.post('/', async (req, res) => {
             const check = getRequiredFields(intent, data);
 
             if (!check.valid) {
-                const missingText = `I need a bit more info: ${check.missing.join(', ')}`;
+                const dateIssues = Object.entries(explicitBookingDates.issues);
+                const missingText = dateIssues.length
+                    ? dateIssues.some(([, issue]) => issue === 'ambiguous')
+                        ? 'I found more than one possible date. Which date should I use? Please give one date in DD-MM-YYYY.'
+                        : `Please give a valid ${dateIssues[0][0] === 'end_date' ? 'check-out date' : 'date'} in DD-MM-YYYY, or say a day such as next Tuesday.`
+                    : `I need a bit more info: ${check.missing.join(', ')}`;
                 return res.json({
                     ...parsed,
+                    data: state,
                     message: missingText,
                     speak: missingText,
                     missing_fields: check.missing,
@@ -1231,6 +1308,9 @@ router.post('/', async (req, res) => {
                 }
             } catch (availErr) {
                 console.error('[chat availability]', availErr);
+                const reply = 'I could not check availability just now. Please try again before confirming this reservation.';
+                return res.json({ ...parsed, data: state, message: reply, speak: reply,
+                    missing_fields: ['availability'], session_token: sessionToken });
             }
 
             const duplicate = await findDuplicateBooking({
@@ -1273,9 +1353,11 @@ router.post('/', async (req, res) => {
                         hotel_room_id = $10,
                         table_id = $11,
                         meeting_room_id = $12,
+                        contact_phone = $13,
+                        contact_email = $14,
                         status = CASE WHEN status = 'confirmed' THEN 'modified' ELSE status END,
                         updated_at = NOW()
-                      WHERE id = $13 RETURNING *`,
+                      WHERE id = $15 RETURNING *`,
                     [
                         data.service_type || (intent.startsWith('book_') ? intent.replace('book_', '') : ''),
                         parsedDate,
@@ -1289,6 +1371,8 @@ router.post('/', async (req, res) => {
                         state.hotel_room_id || null,
                         state.table_id || null,
                         state.meeting_room_id || null,
+                        data.phone_number,
+                        data.email || state.contact_email || null,
                         targetId,
                     ]
                 );

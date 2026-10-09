@@ -18,9 +18,11 @@ An intelligent Hotel & Restaurant Receptionist powered by AI, designed to handle
   - 🏨 **Hotel**: Manage check-ins, check-outs, and room reservations.
   - 🤝 **Meetings**: Schedule meeting rooms and locations.
 - **Booking Changes**: Accepts dates such as “day after tomorrow” or “seventh October this year”, including guest and phone changes in the same message.
+- **Date Accuracy**: Dates use `CALENDAR_TIMEZONE` (Asia/Bangkok by default). “Next Tuesday” means the upcoming Tuesday; on Friday October 9, 2026, that is October 13. Hotel arrival and departure are extracted separately. Invalid or conflicting dates prompt clarification before a booking is saved, and follow-up messages preserve collected details.
 - **Reservation Types**: Explicit hotel, restaurant, and meeting types take priority over incidental room/table words. Corrections preserve other details, and conflicting types prompt clarification. Search criteria are shown separately from a saved reservation.
+- **Reservation Changes**: Lookup collects only the reservation type, name, scheduled reservation date (hotel check-in, dining, or meeting date), and original phone number. All four must match an active booking before editing; start/end times and guest counts are not requested during identification.
 - **Google Calendar Sync**: Updates the existing Calendar event when a booking changes and reports whether synchronization succeeded.
-- **Speech Capabilities**: Stops listening after an utterance and places the transcript in the editable input. The responsive speech sphere stays above the input while listening.
+- **Speech Capabilities**: Stops listening after an utterance and appends the transcript to the editable draft without replacing typed text or earlier recordings. The mic and input are aligned, and input focus returns after recording or sending. The responsive speech sphere stays above the input while listening.
 - **Database Persistence**: Reliable storage of conversations and bookings using PostgreSQL (Neon DB).
 - **Security Hardened**: 
   - Multi-tier rate limiting (Global, Chat, and Bookings).

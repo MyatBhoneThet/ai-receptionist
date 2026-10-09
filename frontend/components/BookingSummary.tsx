@@ -88,8 +88,9 @@ const SLIP_FIELDS: SummaryField[] = [
 
 const SEARCH_FIELDS: SummaryField[] = [
     { key: 'service_type', label: 'Reservation Type', placeholder: 'Hotel, restaurant, or meeting?' },
-    { key: 'date', label: 'Date', placeholder: 'Which date?' },
     { key: 'reservation_name', label: 'Reservation Name', placeholder: 'Whose reservation?' },
+    { key: 'date', label: 'Reservation Date', placeholder: 'Scheduled check-in, dining, or meeting date' },
+    { key: 'phone_number', label: 'Phone Number', placeholder: 'Original booking phone number' },
 ];
 
 function formatSummaryValue(key: string, value: unknown) {
@@ -125,8 +126,9 @@ function formatSummaryValue(key: string, value: unknown) {
 
 export default function BookingSummary({ data, missing_fields = [], intent, confidence, sessionId, sessionToken, availability: availabilityProp, onSuggestDate }: BookingSummaryProps) {
     const [availability, setAvailability] = React.useState<AvailabilityResponse | null>(availabilityProp || null);
-    const reservationIntent = ['reservation_slip', 'modify_booking', 'cancel_booking', 'cancel'].includes(intent || '');
-    const searchMode = reservationIntent && (data?.modify_step === 'awaiting_lookup' || !(data?.id || data?.edit_booking_id));
+    const lookupPending = ['awaiting_lookup', 'awaiting_verification', 'awaiting_selection'].includes(data?.modify_step || '');
+    const reservationIntent = lookupPending || ['reservation_slip', 'modify_booking', 'cancel_booking', 'cancel'].includes(intent || '');
+    const searchMode = lookupPending || (reservationIntent && !(data?.id || data?.edit_booking_id));
     const slipMode = reservationIntent && !searchMode;
 
     React.useEffect(() => {

@@ -1,6 +1,6 @@
 import {
   calendarToday, extractNaturalBookingDate, bookingDateKey,
-  addBookingDays, bookingStayDays,
+  addBookingDays, bookingStayDays, resolveNaturalBookingDate,
 } from '../services/bookingDates.js';
 
 describe('booking calendar dates', () => {
@@ -22,9 +22,45 @@ describe('booking calendar dates', () => {
     ['tomorrow', '06-10-2026'],
     ['18th next month', '18-11-2026'],
     ['next month on 18', '18-11-2026'],
-    ['next Friday', '16-10-2026'],
+    ['next Friday', '09-10-2026'],
   ])('parses %s without shifting day and month', (message, expected) => {
     expect(extractNaturalBookingDate(message, today)).toBe(expected);
+  });
+
+  it.each([
+    ['next Tuesday', '13-10-2026'],
+    ['Tuesday', '13-10-2026'],
+    ['next Friday', '16-10-2026'],
+    ['this Friday', '09-10-2026'],
+    ['next week on Tuesday', '13-10-2026'],
+    ['Tuesday next week', '13-10-2026'],
+    ['this week on Tuesday', '06-10-2026'],
+    ['tomorrow', '10-10-2026'],
+    ['day after tomorrow', '11-10-2026'],
+    ['Tuesday or Wednesday', ''],
+    ['change my meeting to Tuesday or Wednesday', ''],
+    ['book a meeting from 13-10-2026 to 14-10-2026', ''],
+    ['move from 13-10-2026 to 14-10-2026', '14-10-2026'],
+    ['13-10-2026, actually 14-10-2026', '14-10-2026'],
+    ['Tuesday 13-10-2026', '13-10-2026'],
+    ['Tuesday 14-10-2026', ''],
+    ['13-10-2026 or 31-02-2026', ''],
+    ['0803245774', ''],
+  ])('resolves %s from the screenshot date, Friday October 9', (message, expected) => {
+    expect(extractNaturalBookingDate(message, '09-10-2026')).toBe(expected);
+  });
+
+  it('handles upcoming weekdays across the year boundary', () => {
+    expect(extractNaturalBookingDate('next Tuesday', '31-12-2026')).toBe('05-01-2027');
+    expect(extractNaturalBookingDate('next Thursday', '31-12-2026')).toBe('07-01-2027');
+    expect(extractNaturalBookingDate('this Thursday', '31-12-2026')).toBe('31-12-2026');
+  });
+
+  it('distinguishes missing, invalid, and conflicting dates for clarification', () => {
+    expect(resolveNaturalBookingDate('seven guests', today).status).toBe('absent');
+    expect(resolveNaturalBookingDate('31-02-2026', today).status).toBe('invalid');
+    expect(resolveNaturalBookingDate('Tuesday or Wednesday', today).status).toBe('ambiguous');
+    expect(resolveNaturalBookingDate('next Tuesday', '09-10-2026')).toEqual({ date: '13-10-2026', status: 'resolved' });
   });
 
   it.each(['31-02-2026', '2026-13-07', 'thirty-first April this year', '29/02/2026'])('rejects invalid calendar date %s', (value) => {

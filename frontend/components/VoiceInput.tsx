@@ -85,6 +85,7 @@ export default function VoiceInput(props: VoiceInputProps) {
                 : 'bg-white text-ink border border-parchment hover:bg-parchment hover:border-gold hover:text-gold shadow-sm'
                 } ${!supported ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'} active:scale-95 disabled:opacity-50 disabled:grayscale`}
             onClick={toggle}
+            onMouseDown={(event) => event.preventDefault()}
             disabled={disabled || !supported}
             title={!supported ? 'Speech recognition not supported' : (listening ? 'Stop listening' : 'Start voice input')}
             aria-label={listening ? 'Stop listening' : 'Start voice input'}
